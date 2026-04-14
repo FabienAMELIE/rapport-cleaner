@@ -15,17 +15,48 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                  Paragraph, Spacer, Image as RLImage)
 from reportlab.lib.units import mm
 
-# ── Couleurs UI ───────────────────────────────────────────────────────────────
-C_BG       = '#1e2330'
-C_PANEL    = '#252b3b'
-C_CARD     = '#2d3447'
-C_BORDER   = '#3a4257'
-C_ACCENT   = '#e10033'
-C_ACCENT2  = '#b80029'
-C_SUCCESS  = '#2ea043'
-C_TEXT     = '#e8eaf0'
-C_TEXT2    = '#8b93a8'
-C_ENTRY_BG = '#1a1f2e'
+# ── Thèmes UI ────────────────────────────────────────────────────────────────
+THEMES = {
+    'clair': {
+        'C_BG':       '#f5f5f5',
+        'C_PANEL':    '#ffffff',
+        'C_CARD':     '#f0f0f0',
+        'C_BORDER':   '#d0d0d0',
+        'C_TEXT':     '#1a1a1a',
+        'C_TEXT2':    '#666666',
+        'C_ENTRY_BG': '#ffffff',
+    },
+    'sombre': {
+        'C_BG':       '#1e2330',
+        'C_PANEL':    '#252b3b',
+        'C_CARD':     '#2d3447',
+        'C_BORDER':   '#3a4257',
+        'C_TEXT':     '#e8eaf0',
+        'C_TEXT2':    '#8b93a8',
+        'C_ENTRY_BG': '#1a1f2e',
+    },
+}
+
+# Couleurs fixes (indépendantes du thème)
+C_ACCENT  = '#e10033'
+C_ACCENT2 = '#b80029'
+C_SUCCESS = '#2ea043'
+
+# Couleurs actives (initialisées au chargement, mises à jour selon le thème)
+C_BG = C_PANEL = C_CARD = C_BORDER = C_TEXT = C_TEXT2 = C_ENTRY_BG = ''
+
+def apply_theme(theme_name):
+    global C_BG, C_PANEL, C_CARD, C_BORDER, C_TEXT, C_TEXT2, C_ENTRY_BG
+    t = THEMES.get(theme_name, THEMES['clair'])
+    C_BG       = t['C_BG']
+    C_PANEL    = t['C_PANEL']
+    C_CARD     = t['C_CARD']
+    C_BORDER   = t['C_BORDER']
+    C_TEXT     = t['C_TEXT']
+    C_TEXT2    = t['C_TEXT2']
+    C_ENTRY_BG = t['C_ENTRY_BG']
+
+apply_theme('clair')  # thème par défaut
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.rapport_cleaner_config.json')
@@ -56,6 +87,7 @@ def load_config():
     if 'blacklist'    not in cfg: cfg['blacklist']    = list(DEFAULT_BLACKLIST)
     if 'corrections'  not in cfg: cfg['corrections']  = dict(DEFAULT_CORRECTIONS)
     if 'known_ok'     not in cfg: cfg['known_ok']     = []
+    if 'theme'        not in cfg: cfg['theme']        = 'clair'
     return cfg
 
 def save_config(cfg):
@@ -549,27 +581,52 @@ class SettingsWindow(tk.Toplevel):
         nb=ttk.Notebook(self,style='S.TNotebook')
         nb.pack(fill='both',expand=True,padx=12,pady=12)
 
-        # Onglet 1 — Blacklist
+        # ── Onglet 0 — Options générales ─────────────────────────────────────
+        tab0=tk.Frame(nb,bg=C_CARD); nb.add(tab0,text='  ⚙  Options générales  ')
+        tk.Label(tab0,text="Apparence",font=('Helvetica',10,'bold'),bg=C_CARD,fg=C_TEXT).pack(anchor='w',padx=16,pady=(16,6))
+        tk.Frame(tab0,bg=C_BORDER,height=1).pack(fill='x',padx=16,pady=(0,12))
+        theme_f=tk.Frame(tab0,bg=C_CARD); theme_f.pack(fill='x',padx=16,pady=(0,8))
+        tk.Label(theme_f,text="Mode d'affichage :",bg=C_CARD,fg=C_TEXT,font=('Helvetica',9),width=20,anchor='w').pack(side='left')
+        self.theme_var=tk.StringVar(value=self.cfg.get('theme','clair'))
+        for val,lbl in [('clair','☀  Mode clair'),('sombre','🌙  Mode sombre')]:
+            tk.Radiobutton(theme_f,text=lbl,variable=self.theme_var,value=val,
+                           bg=C_CARD,fg=C_TEXT,selectcolor=C_ACCENT,
+                           activebackground=C_CARD,font=('Helvetica',9),padx=12).pack(side='left',padx=4)
+        tk.Label(tab0,text="Le changement de thème sera appliqué au prochain démarrage de l'application.",
+                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),wraplength=580).pack(anchor='w',padx=16,pady=(8,0))
+
+        # ── Onglet 1 — Blacklist ──────────────────────────────────────────────
         tab1=tk.Frame(nb,bg=C_CARD); nb.add(tab1,text='  🚫  Blacklist  ')
-        tk.Label(tab1,text="Termes à ignorer (un par ligne).\nSi une cellule contient uniquement ce terme → supprimée.\nSi une cellule contient ce terme parmi d'autres → seul ce terme est retiré.",
-                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),justify='left',wraplength=640
-                 ).pack(anchor='w',padx=12,pady=(10,4))
-        self.bl_text=scrolledtext.ScrolledText(tab1,height=13,font=('Courier',9),
-            bg=C_ENTRY_BG,fg=C_TEXT,insertbackground=C_TEXT,relief='flat')
-        self.bl_text.pack(fill='both',expand=True,padx=12,pady=(0,4))
-        self.bl_text.insert('end','\n'.join(self.cfg.get('blacklist',[])))
-        bf1=tk.Frame(tab1,bg=C_CARD); bf1.pack(fill='x',padx=12,pady=(0,8))
-        tk.Button(bf1,text="Réinitialiser par défaut",command=self._reset_bl,
+        tk.Label(tab1,text="Termes à ignorer.\n• Cellule contenant uniquement ce terme → supprimée.\n• Cellule contenant ce terme parmi d'autres → seul ce terme est retiré.",
+                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),justify='left',wraplength=640).pack(anchor='w',padx=12,pady=(10,4))
+        lf1=tk.Frame(tab1,bg=C_CARD); lf1.pack(fill='both',expand=True,padx=12,pady=(0,4))
+        self.bl_list=tk.Listbox(lf1,font=('Courier',9),bg=C_ENTRY_BG,fg=C_TEXT,
+            selectbackground=C_ACCENT,relief='flat',borderwidth=0,activestyle='none')
+        sb1=tk.Scrollbar(lf1,command=self.bl_list.yview,bg=C_PANEL)
+        self.bl_list.config(yscrollcommand=sb1.set)
+        sb1.pack(side='right',fill='y'); self.bl_list.pack(side='left',fill='both',expand=True)
+        self._refresh_bl()
+        add_f1=tk.Frame(tab1,bg=C_CARD); add_f1.pack(fill='x',padx=12,pady=(0,8))
+        tk.Label(add_f1,text="Nouveau terme :",bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(side='left')
+        self.bl_entry=tk.Entry(add_f1,width=28,bg=C_ENTRY_BG,fg=C_TEXT,
+            insertbackground=C_TEXT,relief='flat',font=('Helvetica',9))
+        self.bl_entry.pack(side='left',padx=(6,8))
+        self.bl_entry.bind('<Return>',lambda e: self._add_bl())
+        tk.Button(add_f1,text="+ Ajouter",command=self._add_bl,bg=C_ACCENT,fg='white',
+                  relief='flat',padx=10,pady=4,cursor='hand2',font=('Helvetica',8,'bold')).pack(side='left',padx=(0,8))
+        tk.Button(add_f1,text="Supprimer la sélection",command=self._del_bl,
+                  bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left',padx=(0,8))
+        tk.Button(add_f1,text="Réinitialiser",command=self._reset_bl,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
-        # Onglet 2 — Corrections
+        # ── Onglet 2 — Corrections ────────────────────────────────────────────
         tab2=tk.Frame(nb,bg=C_CARD); nb.add(tab2,text='  ✏️  Corrections  ')
         tk.Label(tab2,text='Corrections automatiques de mots (mot erroné → correction)',
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=12,pady=(10,4))
-        lf=tk.Frame(tab2,bg=C_CARD); lf.pack(fill='both',expand=True,padx=12,pady=(0,4))
-        self.corr_list=tk.Listbox(lf,font=('Courier',9),bg=C_ENTRY_BG,fg=C_TEXT,
+        lf2=tk.Frame(tab2,bg=C_CARD); lf2.pack(fill='both',expand=True,padx=12,pady=(0,4))
+        self.corr_list=tk.Listbox(lf2,font=('Courier',9),bg=C_ENTRY_BG,fg=C_TEXT,
             selectbackground=C_ACCENT,relief='flat',borderwidth=0,activestyle='none')
-        sb2=tk.Scrollbar(lf,command=self.corr_list.yview,bg=C_PANEL)
+        sb2=tk.Scrollbar(lf2,command=self.corr_list.yview,bg=C_PANEL)
         self.corr_list.config(yscrollcommand=sb2.set)
         sb2.pack(side='right',fill='y'); self.corr_list.pack(side='left',fill='both',expand=True)
         self._refresh_corr()
@@ -580,10 +637,12 @@ class SettingsWindow(tk.Toplevel):
         tk.Label(af,text="→",bg=C_CARD,fg=C_TEXT2,font=('Helvetica',10)).pack(side='left')
         self.cr=tk.Entry(af,width=16,bg=C_ENTRY_BG,fg=C_TEXT,insertbackground=C_TEXT,relief='flat',font=('Helvetica',9))
         self.cr.pack(side='left',padx=(4,8))
-        tk.Button(af,text="Ajouter",command=self._add_corr,bg=C_ACCENT,fg='white',relief='flat',padx=8,pady=3,cursor='hand2').pack(side='left',padx=4)
-        tk.Button(af,text="Supprimer",command=self._del_corr,bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=8,pady=3,cursor='hand2').pack(side='left')
+        tk.Button(af,text="+ Ajouter",command=self._add_corr,bg=C_ACCENT,fg='white',
+                  relief='flat',padx=8,pady=3,cursor='hand2',font=('Helvetica',8,'bold')).pack(side='left',padx=4)
+        tk.Button(af,text="Supprimer",command=self._del_corr,bg=C_PANEL,fg=C_TEXT2,
+                  relief='flat',padx=8,pady=3,cursor='hand2').pack(side='left')
 
-        # Onglet 3 — Mots acceptés
+        # ── Onglet 3 — Mots acceptés ──────────────────────────────────────────
         tab3=tk.Frame(nb,bg=C_CARD); nb.add(tab3,text='  ✅  Mots acceptés  ')
         tk.Label(tab3,text="Mots que l'outil ne signalera plus comme inconnus.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=12,pady=(10,4))
@@ -594,25 +653,65 @@ class SettingsWindow(tk.Toplevel):
         self.ok_list.config(yscrollcommand=sb3.set)
         sb3.pack(side='right',fill='y'); self.ok_list.pack(side='left',fill='both',expand=True)
         for w in sorted(self.cfg.get('known_ok',[])): self.ok_list.insert('end',f'  {w}')
-        bf3=tk.Frame(tab3,bg=C_CARD); bf3.pack(fill='x',padx=12,pady=(0,8))
-        tk.Button(bf3,text="Supprimer la sélection",command=self._del_ok,bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
-        tk.Button(bf3,text="Tout effacer",command=self._clear_ok,bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left',padx=8)
+        add_f3=tk.Frame(tab3,bg=C_CARD); add_f3.pack(fill='x',padx=12,pady=(0,8))
+        tk.Label(add_f3,text="Nouveau mot :",bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(side='left')
+        self.ok_entry=tk.Entry(add_f3,width=20,bg=C_ENTRY_BG,fg=C_TEXT,
+            insertbackground=C_TEXT,relief='flat',font=('Helvetica',9))
+        self.ok_entry.pack(side='left',padx=(6,8))
+        self.ok_entry.bind('<Return>',lambda e: self._add_ok())
+        tk.Button(add_f3,text="+ Ajouter",command=self._add_ok,bg=C_ACCENT,fg='white',
+                  relief='flat',padx=10,pady=4,cursor='hand2',font=('Helvetica',8,'bold')).pack(side='left',padx=(0,8))
+        tk.Button(add_f3,text="Supprimer la sélection",command=self._del_ok,
+                  bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left',padx=(0,8))
+        tk.Button(add_f3,text="Tout effacer",command=self._clear_ok,
+                  bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
-        # Boutons bas
+        # ── Boutons bas ───────────────────────────────────────────────────────
         bot=tk.Frame(self,bg=C_BG); bot.pack(fill='x',padx=12,pady=(0,12))
         tk.Button(bot,text="✓ Enregistrer",command=self._save,bg=C_SUCCESS,fg='white',
                   font=('Helvetica',10,'bold'),padx=20,pady=6,relief='flat',cursor='hand2').pack(side='right')
         tk.Button(bot,text="Annuler",command=self.destroy,bg=C_PANEL,fg=C_TEXT2,
                   font=('Helvetica',10),padx=14,pady=6,relief='flat',cursor='hand2').pack(side='right',padx=8)
 
+    def _refresh_bl(self):
+        self.bl_list.delete(0,'end')
+        for term in self.cfg.get('blacklist',[]):
+            self.bl_list.insert('end',f'  {term}')
+
+    def _add_bl(self):
+        term=self.bl_entry.get().strip()
+        if term:
+            bl=self.cfg.setdefault('blacklist',[])
+            if term not in bl:
+                bl.append(term)
+                self._refresh_bl()
+            self.bl_entry.delete(0,'end')
+
+    def _del_bl(self):
+        sel=self.bl_list.curselection()
+        if sel:
+            term=self.bl_list.get(sel[0]).strip()
+            bl=self.cfg.get('blacklist',[])
+            if term in bl: bl.remove(term)
+            self._refresh_bl()
+
+    def _reset_bl(self):
+        self.cfg['blacklist']=list(DEFAULT_BLACKLIST)
+        self._refresh_bl()
+
+    def _add_ok(self):
+        word=self.ok_entry.get().strip()
+        if word:
+            ok=self.cfg.setdefault('known_ok',[])
+            if word not in ok:
+                ok.append(word)
+                self.ok_list.insert('end',f'  {word}')
+            self.ok_entry.delete(0,'end')
+
     def _refresh_corr(self):
         self.corr_list.delete(0,'end')
         for w,r in sorted(self.cfg.get('corrections',{}).items()):
             self.corr_list.insert('end',f'  {w}  →  {r}')
-
-    def _reset_bl(self):
-        self.bl_text.delete('1.0','end')
-        self.bl_text.insert('end','\n'.join(DEFAULT_BLACKLIST))
 
     def _add_corr(self):
         w=self.cw.get().strip(); r=self.cr.get().strip()
@@ -641,8 +740,7 @@ class SettingsWindow(tk.Toplevel):
         self.cfg['known_ok']=[]; self.ok_list.delete(0,'end')
 
     def _save(self):
-        lines=[l.strip() for l in self.bl_text.get('1.0','end').splitlines() if l.strip()]
-        self.cfg['blacklist']=lines
+        self.cfg['theme']=self.theme_var.get()
         save_config(self.cfg)
         self.on_save()
         self.destroy()
@@ -653,8 +751,9 @@ class App(tk.Tk):
         super().__init__()
         self.title("Rapport Cleaner — Loading Systems")
         self.resizable(False, False)
-        self.configure(bg=C_BG)
         self.cfg = load_config()
+        apply_theme(self.cfg.get('theme', 'clair'))
+        self.configure(bg=C_BG)
         self.pdf_path = tk.StringVar()
         self.out_path = tk.StringVar()
         self._build_ui()
