@@ -209,7 +209,7 @@ def detect_structure(pdf_path):
         return {'style': 'nom_commentaire', 'headers': header}
     data_cols = {}; n_col = None
     for i, h in enumerate(header):
-        if re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série', h): n_col = i
+        if re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$', h): n_col = i
         elif re.search(r'\bn\b|numéro', h) and n_col is None: n_col = i
         elif re.search(r'porte', h): data_cols['porte'] = i
         elif re.search(r'niveleur|quai', h): data_cols['niv'] = i
@@ -471,8 +471,7 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     doc.build(story)
 
 def _build_summary(rows_data, title):
-    ts=ParagraphStyle('ts',fontSize=13,fontName='Helvetica-Bold',spaceAfter=2)
-    ss=ParagraphStyle('ss',fontSize=9,fontName='Helvetica',textColor=colors.HexColor('#666666'),spaceAfter=8)
+    ts=ParagraphStyle('ts',fontSize=13,fontName='Helvetica-Bold',spaceAfter=8,alignment=1)
     ns=ParagraphStyle('n',fontSize=8.5,fontName='Helvetica',textColor=colors.HexColor('#333333'),spaceAfter=4,leading=13)
     def eq(seg):
         m=re.match(r'^\s*(\d+)\s*(?:x\s*)?',seg.strip()); return int(m.group(1)) if m else 1
@@ -543,7 +542,10 @@ def _build_summary(rows_data, title):
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
         return f"<b>{lbl}</b> ({tot}) : {', '.join(parts)}"
-    story=[Paragraph(title,ts),Paragraph("Rapport d'intervention nettoyé automatiquement",ss)]
+    # Titre centré : "Nom société — Rapport d'intervention"
+    société = re.sub(r'[\s_\-]+clean$','', title, flags=re.IGNORECASE).strip()
+    titre_final = f"{société} — Rapport d'intervention"
+    story=[Paragraph(titre_final, ts)]
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     for lbl in sorted(tcats.keys()): story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
     for c,d in cats.items(): story.append(Paragraph(fmt(c,d),ns))
