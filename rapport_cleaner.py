@@ -3,7 +3,7 @@ Rapport Cleaner — Loading Systems
 Nettoie automatiquement les rapports d'intervention PDF de techniciens.
 """
 
-import os, re, sys, json, threading
+import os, re, sys, json, threading, tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import pdfplumber
@@ -15,15 +15,48 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                  Paragraph, Spacer, Image as RLImage)
 from reportlab.lib.units import mm
 
-# ── Config persistence ────────────────────────────────────────────────────────
+# ── Couleurs UI ───────────────────────────────────────────────────────────────
+C_BG       = '#1e2330'
+C_PANEL    = '#252b3b'
+C_CARD     = '#2d3447'
+C_BORDER   = '#3a4257'
+C_ACCENT   = '#e10033'
+C_ACCENT2  = '#b80029'
+C_SUCCESS  = '#2ea043'
+C_TEXT     = '#e8eaf0'
+C_TEXT2    = '#8b93a8'
+C_ENTRY_BG = '#1a1f2e'
+
+# ── Config ────────────────────────────────────────────────────────────────────
 CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.rapport_cleaner_config.json')
+
+DEFAULT_BLACKLIST = [
+    'ras', 'x', 'graissage resserrage', 'graissage', 'gressage resserrage',
+    'sécurité ok', 'securite ok', 'condamné', 'condamne',
+    'occupé par camion en permanence', 'vétuste', 'vetuste',
+    'bavette supérieur vétuste', 'bavette superieur vetuste',
+]
+
+DEFAULT_CORRECTIONS = {
+    'poignet': 'poignée', 'chassepied': 'chasse-pied',
+    'poignetlsf': 'poignée LSF', 'plusieursfois': 'plusieurs fois',
+    'déforméqui': 'déformé qui', 'ferryqui': 'ferry qui',
+    'bâchecôté': 'bâche côté', 'automanu': 'auto/manu',
+    'biquette': 'béquille', 'devisencours': 'Devis en cours',
+    'dequai': 'de quai', 'spotà': 'spot à',
+    'choquer': 'choquée', 'choqué': 'choquée',
+}
 
 def load_config():
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            cfg = json.load(f)
     except:
-        return {'blacklist_extra': [], 'corrections': {}, 'known_structures': {}}
+        cfg = {}
+    if 'blacklist'    not in cfg: cfg['blacklist']    = list(DEFAULT_BLACKLIST)
+    if 'corrections'  not in cfg: cfg['corrections']  = dict(DEFAULT_CORRECTIONS)
+    if 'known_ok'     not in cfg: cfg['known_ok']     = []
+    return cfg
 
 def save_config(cfg):
     try:
@@ -32,7 +65,7 @@ def save_config(cfg):
     except:
         pass
 
-# ── Core processing logic ─────────────────────────────────────────────────────
+# ── Traitement texte ──────────────────────────────────────────────────────────
 NEVER_SUFFIX = {'bas','les','des','sur','par','pas','ou','et','en','un','une',
                 'du','de','la','le','hs','ras','nord','sud','est','ral','plus',
                 'avec','pour','dans'}
@@ -51,7 +84,7 @@ def fix_word_breaks(text):
                 if m:
                     lw = m.group()
                     ends_c = bool(re.search(r'[^aeiouàâéèêëîïôùûüyAEIOUÀÂÉÈÊËÎÏÔÙÛÜY]$', lw))
-                    if (ends_c or len(lw) <= 11) and len(lw+nxt) >= 5:
+                    if (ends_c or len(lw)<=11) and len(lw+nxt)>=5:
                         result.append(line.rstrip()[:m.start()]+lw+nxt); i+=2; continue
         result.append(line); i+=1
     return re.sub(r' {2,}', ' ', ' '.join(result)).strip()
@@ -93,70 +126,56 @@ NOISE_WORDS = {'rien','a','à','signaler','ras','condamné','condamne','choc',
                'leger','léger','panneau','bas','extérieur','exterieur','inter',
                'et','de','le','la','les','du','sur','hublot','x'}
 
-BASE_BLACKLIST = [
-    r'^r[ae]s$',
-    r'^x$',
-    r'^g?r[ae]iss[ae]ge\s*r?e?ss?err[ae]ge?$',
-    r'^g?r[ae]iss[ae]ge$',
-    r'^gressage\s*resserrage$',
-    r'^s[ée]curit[ée]\s*ok$',
-    r'^condamné$',
-    r'^occupé\s+par\s+camion\s+en\s+permanence$',
-    r'^vétuste$', r'^vetuste$',
-    r'^\s*$',
-]
-
-def is_blacklisted(text, extra_patterns=None):
+def is_blacklisted_full(text, blacklist):
     if not text or not text.strip(): return True
     t = text.strip()
-    all_patterns = BASE_BLACKLIST + (extra_patterns or [])
-    for pat in all_patterns:
-        if re.fullmatch(pat, t, re.IGNORECASE): return True
     if t.upper() == 'X': return True
-    # Check if all meaningful words are noise
-    words = re.findall(r'[a-zA-ZÀ-ÿ]+', t.lower())
+    tl = t.lower()
+    for term in blacklist:
+        if re.fullmatch(re.escape(term.strip()), tl, re.IGNORECASE): return True
+        try:
+            if re.fullmatch(term.strip(), tl, re.IGNORECASE): return True
+        except: pass
+    words = re.findall(r'[a-zA-ZÀ-ÿ]+', tl)
     return len([w for w in words if w not in NOISE_WORDS]) == 0
 
+def strip_blacklisted_parts(text, blacklist):
+    """Supprime les parties blacklistées dans une cellule mixte."""
+    if not text: return text
+    segments = re.split(r'\s*\+\s*', text.strip())
+    kept = [s.strip() for s in segments
+            if s.strip() and not is_blacklisted_full(s.strip(), blacklist)]
+    return ' + '.join(kept).strip()
+
 def apply_corrections(text, corrections):
-    """Apply learned text corrections."""
     for wrong, right in corrections.items():
         text = re.sub(r'\b' + re.escape(wrong) + r'\b', right, text, flags=re.IGNORECASE)
     return text
 
-def clean_cell(text, corrections=None, extra_blacklist=None):
+def clean_cell(text, corrections=None, blacklist=None):
     if not text: return ''
     t = fix_word_breaks(text)
     if corrections: t = apply_corrections(t, corrections)
     t = strip_choc(t)
-    # Filter "remplacement effectué"
     t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+effectué\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'^[\s/\-,;]+','',t); t = re.sub(r'[\s/\-,;]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
-    return '' if is_blacklisted(t, extra_blacklist) else t
+    bl = blacklist or []
+    if is_blacklisted_full(t, bl): return ''
+    t = strip_blacklisted_parts(t, bl)
+    if is_blacklisted_full(t, bl): return ''
+    return t
 
-# ── PDF structure detection ───────────────────────────────────────────────────
+# ── Détection structure PDF ───────────────────────────────────────────────────
 def detect_structure(pdf_path):
-    """
-    Auto-detect PDF table structure.
-    Returns dict with:
-      - headers: list of column headers
-      - data_cols: dict mapping role -> col_index
-      - n_col: index of N/ID column
-      - style: 'standard' (N + cols) or 'nom_commentaire' (N° série + Nom + Commentaire)
-    """
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[0]
         tables = page.extract_tables()
         if not tables or not tables[0]: return None
         header = [fix_word_breaks(c).strip().lower() if c else '' for c in tables[0][0]]
-
-    # Detect nom/commentaire style (KN Soissons)
     if any('nom' in h for h in header) and any('commentaire' in h for h in header):
         return {'style': 'nom_commentaire', 'headers': header}
-
-    # Standard style — find key columns
-    data_cols = {}
-    n_col = None
+    data_cols = {}; n_col = None
     for i, h in enumerate(header):
         if re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série', h): n_col = i
         elif re.search(r'\bn\b|numéro', h) and n_col is None: n_col = i
@@ -167,36 +186,27 @@ def detect_structure(pdf_path):
         elif re.search(r'rideau', h): data_cols['rideau'] = i
         elif re.search(r'cale', h): data_cols['cale'] = i
         elif re.search(r'chandelle', h): data_cols['chandelle'] = i
-
     if n_col is None: n_col = 0
+    return {'style': 'standard', 'headers': header, 'n_col': n_col, 'data_cols': data_cols}
 
-    return {
-        'style': 'standard',
-        'headers': header,
-        'n_col': n_col,
-        'data_cols': data_cols,
-    }
-
-def detect_unknown_words(pdf_path, structure, corrections, extra_blacklist):
-    """Scan all cells for words that look unusual/unknown — possible typos or new terms."""
-    KNOWN_WORDS = {
+def detect_unknown_words(pdf_path, corrections, blacklist):
+    KNOWN = {
         'hs','ras','choc','panneau','bas','inter','intermédiaire','haut','niveleur',
         'porte','sas','butoire','rideau','cale','tendeur','long','court','extensible',
         'crochet','joint','bavette','hublot','câble','cable','verrou','butée','butee',
         'flexible','verin','hydraulique','vidange','soudure','fixation','roulette',
         'parachute','moteur','carte','relais','électronique','spot','led','luminaire',
         'graissage','resserrage','vétuste','condamné','occupé','camion','permanence',
-        'plaque','nacelle','toucan','traversee','traverse','devis','cours',
-        'poignée','poignet','chasse','pied','béquille','biquette','charnière',
-        'spirale','raccordement','boîte','rampe','benne','locale','souple','sécurité',
-        'suspension','suspente','rail','montant','barre','écartement','corde','tirage',
-        'orange','mètres','câbles','traction','diamètre','paire','galets','support',
-        'roulette','emboîtement','crawford','poignée','tablier','usure','avancé',
-        'lame','finale','nacelle','asservissement','absence','cellule','fuite',
-        'bavette','caisson','arrière','cuve','groupe','choquer','choquée','poutre',
-        'tordu','profil','alu','horizontal','fermer','ferry','niveleur','prévoir',
-        'passage','commercial','arrêt','urgence','complet','contact','manque','ras',
-        'rien','signaler','x','ok','mfz','lsf','hs','pi','pb','ph','auto','manu',
+        'plaque','nacelle','toucan','traverse','devis','cours','poignée','poignet',
+        'chasse','pied','béquille','biquette','charnière','spirale','raccordement',
+        'boîte','rampe','benne','locale','souple','sécurité','suspente','rail',
+        'montant','barre','écartement','corde','tirage','orange','mètres','câbles',
+        'traction','diamètre','paire','galets','support','emboîtement','crawford',
+        'tablier','usure','avancé','lame','finale','asservissement','absence',
+        'cellule','fuite','caisson','arrière','cuve','groupe','choquée','poutre',
+        'tordu','profil','alu','horizontal','ferry','prévoir','passage','commercial',
+        'arrêt','urgence','complet','contact','manque','mfz','lsf','pi','pb','ph',
+        'auto','manu','béquille','charnière','supérieur','inférieur',
     }
     unknowns = set()
     with pdfplumber.open(pdf_path) as pdf:
@@ -209,14 +219,12 @@ def detect_unknown_words(pdf_path, structure, corrections, extra_blacklist):
                     t = fix_word_breaks(cell).lower()
                     t = apply_corrections(t, corrections)
                     for word in re.findall(r'[a-zA-ZÀ-ÿ]{4,}', t):
-                        if word not in KNOWN_WORDS and not is_blacklisted(word, extra_blacklist):
-                            # Only flag words that look like they could be typos
-                            # (not too long, not obviously a real French word)
+                        if word not in KNOWN and not is_blacklisted_full(word, blacklist):
                             if len(word) <= 15:
                                 unknowns.add(word)
     return unknowns
 
-# ── PDF generation ────────────────────────────────────────────────────────────
+# ── Génération PDF ────────────────────────────────────────────────────────────
 TXT = colors.HexColor('#222222')
 HEADER_BG = colors.HexColor('#404040')
 
@@ -232,8 +240,8 @@ def make_img(name, img_dir):
     try:
         with PILImage.open(path) as im: w, h = im.size
         mh, mw = 20*mm, 23*mm; r = w/h
-        rw = min(mw, mh*r) if r >= 1 else (min(mh, mw/r)*r)
-        rh = rw/r if r >= 1 else min(mh, mw/r)
+        rw = min(mw, mh*r) if r>=1 else (min(mh, mw/r)*r)
+        rh = rw/r if r>=1 else min(mh, mw/r)
         return RLImage(path, width=rw, height=rh)
     except: return ''
 
@@ -275,10 +283,9 @@ def extract_and_map_images(pdf_path, img_dir, n_col=1):
                     if ry0<=mid<=ry1: best=ri; break
                     d=abs(mid-(ry0+ry1)/2)
                     if d<bdist: bdist=d; best=ri
-                if best is not None and best < len(tables[0]):
+                if best is not None and best<len(tables[0]):
                     n_val = tables[0][best][n_col]
-                    if n_val:
-                        n_val = fix_word_breaks(n_val).strip()
+                    if n_val: n_val = fix_word_breaks(n_val).strip()
                     if n_val and n_val not in ('N°','N','Numéros','#','N°\nde\nsérie',''):
                         row_imgs.setdefault(n_val,[]).append((img['x0'],img['name']))
             for nv, il in row_imgs.items():
@@ -288,46 +295,34 @@ def extract_and_map_images(pdf_path, img_dir, n_col=1):
                 else: img_map[nv].extend(names)
     return img_map
 
-def generate_pdf(pdf_path, output_path, structure, corrections, extra_blacklist, log_fn=None):
-    import tempfile
+def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_fn=None):
     def log(msg):
         if log_fn: log_fn(msg)
-
     style = structure.get('style', 'standard')
-    # Use system temp dir to avoid permission issues on Windows
     img_dir = os.path.join(tempfile.gettempdir(), 'rapport_cleaner_imgs')
-    n_col = structure.get('n_col', 1)
+    img_n_col = structure.get('n_col', 1)
+    if style == 'nom_commentaire': img_n_col = 0
+    elif img_n_col == 0: img_n_col = 1
 
     log("Extraction des images...")
-    # For image mapping, use the N column (quai number), not the # column
-    img_n_col = structure.get('n_col', 1)
-    if img_n_col == 0 and structure.get('style') == 'standard':
-        img_n_col = 1
-    # For nom_commentaire style, images are mapped by N° série (col 0)
-    if structure.get('style') == 'nom_commentaire':
-        img_n_col = 0
     img_map = extract_and_map_images(pdf_path, img_dir, n_col=img_n_col)
-    log(f"  → {sum(len(v) for v in img_map.values())} image(s) extraite(s) pour {len(img_map)} ligne(s)")
+    log(f"  → {sum(len(v) for v in img_map.values())} image(s) pour {len(img_map)} ligne(s)")
 
     log("Lecture du tableau...")
-
     if style == 'nom_commentaire':
-        rows_data, quais = _read_nom_commentaire(pdf_path, corrections, extra_blacklist)
+        rows_data, quais = _read_nom_commentaire(pdf_path, corrections, blacklist)
     else:
-        rows_data = _read_standard(pdf_path, structure, corrections, extra_blacklist)
+        rows_data = _read_standard(pdf_path, structure, corrections, blacklist)
         quais = None
 
     log("Génération du PDF...")
     _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log)
     log(f"✓ PDF généré : {output_path}")
-def _read_standard(pdf_path, structure, corrections, extra_blacklist):
-    dc = structure.get('data_cols', {})
-    n_col = structure.get('n_col', 0)
-    # Determine col order: porte, niv, sas, but, rideau, cale, chandelle
-    col_order = ['porte','niv','sas','but','rideau','cale','chandelle']
 
-    rows_data = []
-    seen = set()
+def _read_standard(pdf_path, structure, corrections, blacklist):
+    dc = structure.get('data_cols', {}); n_col = structure.get('n_col', 0)
+    col_order = ['porte','niv','sas','but','rideau','cale','chandelle']
+    rows_data = []; seen = set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
@@ -337,19 +332,17 @@ def _read_standard(pdf_path, structure, corrections, extra_blacklist):
                 n = fix_word_breaks(row[n_col]).strip()
                 if not n or n in ('N','N°','#','Numéros','∑') or n in seen: continue
                 if re.search(r'[a-zA-Z]{3,}', n) and not re.search(r'\d', n):
-                    # Probably a header repeat or label row — skip
                     if n.lower() in ('n','n°','numéros','image','photo','porte','niveleur','sas'): continue
                 seen.add(n)
                 fields = []
                 for role in col_order:
                     idx = dc.get(role)
-                    raw = row[idx] if idx is not None and idx < len(row) and row[idx] else ''
-                    fields.append(clean_cell(raw, corrections, extra_blacklist))
+                    raw = row[idx] if idx is not None and idx<len(row) and row[idx] else ''
+                    fields.append(clean_cell(raw, corrections, blacklist))
                 rows_data.append((len(rows_data), n) + tuple(fields))
     return rows_data
 
-def _read_nom_commentaire(pdf_path, corrections, extra_blacklist):
-    """Handle KN Soissons style: N°série / Nom / Commentaire."""
+def _read_nom_commentaire(pdf_path, corrections, blacklist):
     quais = {}
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -359,7 +352,7 @@ def _read_nom_commentaire(pdf_path, corrections, extra_blacklist):
                 if not row or not row[0] or 'série' in (row[0] or '').lower(): continue
                 serie = row[0].strip()
                 nom = fix_word_breaks(row[1]) if row[1] else ''
-                com = clean_cell(fix_word_breaks(row[2]) if row[2] else '', corrections, extra_blacklist)
+                com = clean_cell(fix_word_breaks(row[2]) if row[2] else '', corrections, blacklist)
                 if re.search(r'porte sectionnelle', nom, re.IGNORECASE):
                     m = re.search(r'(?:abloy|assa)\s+(\d+)', nom, re.IGNORECASE) or re.search(r'(\d+)\s*$', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['porte']=(serie,com)
@@ -372,10 +365,10 @@ def _read_nom_commentaire(pdf_path, corrections, extra_blacklist):
     rows_data = []
     for qn in sorted(quais.keys()):
         d = quais[qn]
-        cp = d.get('porte',('',''))[1]
-        cn = d.get('niv',('',''))[1]
-        cs = d.get('sas',('',''))[1]
-        rows_data.append((qn, str(qn), cp, cn, cs, '', ''))
+        rows_data.append((qn, str(qn),
+                          d.get('porte',('',''))[1],
+                          d.get('niv',  ('',''))[1],
+                          d.get('sas',  ('',''))[1], '', ''))
     return rows_data, quais
 
 def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
@@ -383,99 +376,64 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     dc = structure.get('data_cols', {})
     col_order = ['porte','niv','sas','but','rideau','cale','chandelle']
     active_cols = [r for r in col_order if r in dc] if style=='standard' else ['porte','niv','sas']
-
-    COL_LABELS = {
-        'porte':'Porte sectionnelle','niv':'Niveleur / Quai',
-        'sas':'SAS','but':'Butoire','rideau':'Rideau',
-        'cale':'Cale','chandelle':'Chandelle'
-    }
-    N_PHOTOS = 4
-    N_IMG_WIDTH = 22*mm
-    N_COL_WIDTH = 14*mm
-
-    # Distribute remaining width among data cols
-    page_w = landscape(A4)[0] - 20*mm  # margins
-    img_total = N_PHOTOS * N_IMG_WIDTH
-    n_total = N_COL_WIDTH
-    data_total = page_w - img_total - n_total
-    data_col_w = data_total / max(len(active_cols), 1)
-    col_widths = [N_COL_WIDTH] + [data_col_w]*len(active_cols) + [N_IMG_WIDTH]*N_PHOTOS
-
-    headers = ['N°'] + [COL_LABELS.get(r,r) for r in active_cols] + [f'Photo {i+1}' for i in range(N_PHOTOS)]
-    header_row = [make_cell(h, bold=True, size=8, color=colors.white) for h in headers]
-
+    COL_LABELS = {'porte':'Porte sectionnelle','niv':'Niveleur / Quai','sas':'SAS',
+                  'but':'Butoire','rideau':'Rideau','cale':'Cale','chandelle':'Chandelle'}
+    N_PHOTOS=4; N_IMG_W=22*mm; N_COL_W=14*mm
+    page_w = landscape(A4)[0]-20*mm
+    data_col_w = (page_w - N_PHOTOS*N_IMG_W - N_COL_W) / max(len(active_cols),1)
+    col_widths = [N_COL_W]+[data_col_w]*len(active_cols)+[N_IMG_W]*N_PHOTOS
+    headers = ['N°']+[COL_LABELS.get(r,r) for r in active_cols]+[f'Photo {i+1}' for i in range(N_PHOTOS)]
+    header_row = [make_cell(h,bold=True,size=8,color=colors.white) for h in headers]
     table_data = [header_row]
     style_cmds = [
-        ('BACKGROUND',(0,0),(-1,0),HEADER_BG),
-        ('TEXTCOLOR',(0,0),(-1,0),colors.white),
-        ('ALIGN',(0,0),(-1,0),'CENTER'),
-        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-        ('FONTSIZE',(0,0),(-1,0),8),
+        ('BACKGROUND',(0,0),(-1,0),HEADER_BG),('TEXTCOLOR',(0,0),(-1,0),colors.white),
+        ('ALIGN',(0,0),(-1,0),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,0),8),
         ('GRID',(0,0),(-1,-1),0.3,colors.HexColor('#cccccc')),
         ('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3),
         ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
         ('ROWHEIGHT',(0,0),(-1,0),10*mm),
     ]
-
     alt = 0
     for row in rows_data:
-        n = row[1]
-        fields = list(row[2:])
-        # Only take fields for active cols
+        n = row[1]; fields = list(row[2:])
         active_fields = fields[:len(active_cols)]
         if not any(f.strip() for f in active_fields): continue
-
-        # Get images
-        if style == 'nom_commentaire' and quais:
-            qn = int(n)
-            d = quais.get(qn, {})
-            ps = d.get('porte',('',''))[0]
-            ns_s = d.get('niv',('',''))[0]
-            ss_s = d.get('sas',('',''))[0]
-            imgs = (img_map.get(ps,[]) + img_map.get(ns_s,[]) +
-                    img_map.get(ss_s,[]))
+        if style=='nom_commentaire' and quais:
+            qn=int(n); d=quais.get(qn,{})
+            imgs = (img_map.get(d.get('porte',('',''))[0],[]) +
+                    img_map.get(d.get('niv',  ('',''))[0],[]) +
+                    img_map.get(d.get('sas',  ('',''))[0],[]))
         else:
-            imgs = img_map.get(n, [])
-
-        img_cells = [make_img(imgs[i], img_dir) if i<len(imgs) else '' for i in range(N_PHOTOS)]
-        data_cells = [make_cell(f, bold=bool(f), size=7.5) for f in active_fields]
-        table_data.append([make_cell(n, bold=True, size=7.5)] + data_cells + img_cells)
-
-        idx = len(table_data)-1
-        bg = colors.HexColor('#f2f2f2') if alt%2==0 else colors.white
-        style_cmds.append(('BACKGROUND',(0,idx),(-1,idx),bg))
+            imgs = img_map.get(n,[])
+        img_cells = [make_img(imgs[i],img_dir) if i<len(imgs) else '' for i in range(N_PHOTOS)]
+        data_cells = [make_cell(f,bold=bool(f),size=7.5) for f in active_fields]
+        table_data.append([make_cell(n,bold=True,size=7.5)]+data_cells+img_cells)
+        idx=len(table_data)-1
+        style_cmds.append(('BACKGROUND',(0,idx),(-1,idx),colors.HexColor('#f2f2f2') if alt%2==0 else colors.white))
         style_cmds.append(('ROWHEIGHT',(0,idx),(-1,idx),22*mm if imgs else 7*mm))
-        alt += 1
+        alt+=1
 
-    # Build summary
-    summary_rows = []
+    # Summary
+    summary_rows=[]
     for row in rows_data:
-        n = row[1]; fields = list(row[2:])
-        # Map to (row_num, n, sas_field, other_fields...)
-        # For summary, col_idx 2 = sas position
-        if style == 'nom_commentaire':
-            # fields = [porte, niv, sas, ...]
-            summary_rows.append((0, n, fields[0] if len(fields)>0 else '',
-                                  fields[1] if len(fields)>1 else '',
-                                  fields[2] if len(fields)>2 else '', '', ''))
+        n=row[1]; fields=list(row[2:])
+        if style=='nom_commentaire':
+            summary_rows.append((0,n,fields[0] if len(fields)>0 else '',
+                                   fields[1] if len(fields)>1 else '',
+                                   fields[2] if len(fields)>2 else '','',''))
         else:
-            # Map active cols to standard positions
-            col_map = {r:i for i,r in enumerate(active_cols)}
-            p = fields[col_map['porte']] if 'porte' in col_map else ''
-            niv = fields[col_map['niv']] if 'niv' in col_map else ''
-            sas = fields[col_map['sas']] if 'sas' in col_map else ''
-            summary_rows.append((0, n, p, niv, sas, '', ''))
+            cm={r:i for i,r in enumerate(active_cols)}
+            summary_rows.append((0,n,
+                fields[cm['porte']] if 'porte' in cm else '',
+                fields[cm['niv']]   if 'niv'   in cm else '',
+                fields[cm['sas']]   if 'sas'   in cm else '','',''))
 
-    # Extract title from filename
     fname = os.path.splitext(os.path.basename(output_path))[0]
-    title = fname.replace('_',' ').replace('-',' ')
-
-    story = _build_summary(summary_rows, title)
+    story = _build_summary(summary_rows, fname.replace('_',' ').replace('-',' '))
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
-
     doc = SimpleDocTemplate(output_path, pagesize=landscape(A4),
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     doc.build(story)
@@ -484,14 +442,11 @@ def _build_summary(rows_data, title):
     ts=ParagraphStyle('ts',fontSize=13,fontName='Helvetica-Bold',spaceAfter=2)
     ss=ParagraphStyle('ss',fontSize=9,fontName='Helvetica',textColor=colors.HexColor('#666666'),spaceAfter=8)
     ns=ParagraphStyle('n',fontSize=8.5,fontName='Helvetica',textColor=colors.HexColor('#333333'),spaceAfter=4,leading=13)
-
     def eq(seg):
         m=re.match(r'^\s*(\d+)\s*(?:x\s*)?',seg.strip()); return int(m.group(1)) if m else 1
-
     cats={}; tcats={}; vns=[]
     def add(c,n,q=1): cats.setdefault(c,{}); cats[c][n]=cats[c].get(n,0)+q
     def addt(l,n,q=1): tcats.setdefault(l,{}); tcats[l][n]=tcats[l].get(n,0)+q
-
     for row in rows_data:
         n=row[1]
         for ci,f in enumerate(row[2:]):
@@ -518,8 +473,7 @@ def _build_summary(rows_data, title):
                     elif dl or sl: typ='L'
                     else:
                         m2=re.search(r'tendeurs?\s+([a-zA-Z])',seg); typ=m2.group(1).upper() if m2 else '?'
-                    lbl={'E':'Tendeur E (extensible)','L':'Tendeur L (long)','C':'Tendeur C (court)'}.get(typ,f'Tendeur {typ}')
-                    addt(lbl,n,q)
+                    addt({'E':'Tendeur E (extensible)','L':'Tendeur L (long)','C':'Tendeur C (court)'}.get(typ,f'Tendeur {typ}'),n,q)
             else:
                 hp=bool(re.search(r'\bpanneau\b|\binterm[eé]diaire\b|\bpi\b|\bpb\b|\bph\b',fl))
                 hj=bool(re.search(r'\bjoint\b',fl))
@@ -554,11 +508,9 @@ def _build_summary(rows_data, title):
                 elif 'cellule' in fl or 'asservissement' in fl: add('Absence cellule asservissement',n)
                 elif 'tendeur' in fl: addt('Tendeur L (long)',n,eq(fl))
                 else: add('Autre',n)
-
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
         return f"<b>{lbl}</b> ({tot}) : {', '.join(parts)}"
-
     story=[Paragraph(title,ts),Paragraph("Rapport d'intervention nettoyé automatiquement",ss)]
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     for lbl in sorted(tcats.keys()): story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
@@ -568,92 +520,242 @@ def _build_summary(rows_data, title):
     story.append(Spacer(1,6))
     return story
 
-# ── GUI ───────────────────────────────────────────────────────────────────────
+# ── Fenêtre Paramètres ────────────────────────────────────────────────────────
+class SettingsWindow(tk.Toplevel):
+    def __init__(self, parent, cfg, on_save):
+        super().__init__(parent)
+        self.title("Paramètres — Rapport Cleaner")
+        self.configure(bg=C_BG)
+        self.resizable(True, True)
+        self.geometry("700x520")
+        self.grab_set()
+        self.cfg = cfg
+        self.on_save = on_save
+        self._build()
+        self._center(parent)
+
+    def _center(self, parent):
+        self.update_idletasks()
+        pw=parent.winfo_x(); py=parent.winfo_y()
+        pw2=parent.winfo_width(); ph2=parent.winfo_height()
+        w,h=self.winfo_width(),self.winfo_height()
+        self.geometry(f"+{pw+(pw2-w)//2}+{py+(ph2-h)//2}")
+
+    def _build(self):
+        s=ttk.Style(); s.theme_use('default')
+        s.configure('S.TNotebook',background=C_BG,borderwidth=0)
+        s.configure('S.TNotebook.Tab',background=C_PANEL,foreground=C_TEXT2,padding=[14,6],font=('Helvetica',9))
+        s.map('S.TNotebook.Tab',background=[('selected',C_CARD)],foreground=[('selected',C_TEXT)])
+        nb=ttk.Notebook(self,style='S.TNotebook')
+        nb.pack(fill='both',expand=True,padx=12,pady=12)
+
+        # Onglet 1 — Blacklist
+        tab1=tk.Frame(nb,bg=C_CARD); nb.add(tab1,text='  🚫  Blacklist  ')
+        tk.Label(tab1,text="Termes à ignorer (un par ligne).\nSi une cellule contient uniquement ce terme → supprimée.\nSi une cellule contient ce terme parmi d'autres → seul ce terme est retiré.",
+                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),justify='left',wraplength=640
+                 ).pack(anchor='w',padx=12,pady=(10,4))
+        self.bl_text=scrolledtext.ScrolledText(tab1,height=13,font=('Courier',9),
+            bg=C_ENTRY_BG,fg=C_TEXT,insertbackground=C_TEXT,relief='flat')
+        self.bl_text.pack(fill='both',expand=True,padx=12,pady=(0,4))
+        self.bl_text.insert('end','\n'.join(self.cfg.get('blacklist',[])))
+        bf1=tk.Frame(tab1,bg=C_CARD); bf1.pack(fill='x',padx=12,pady=(0,8))
+        tk.Button(bf1,text="Réinitialiser par défaut",command=self._reset_bl,
+                  bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
+
+        # Onglet 2 — Corrections
+        tab2=tk.Frame(nb,bg=C_CARD); nb.add(tab2,text='  ✏️  Corrections  ')
+        tk.Label(tab2,text='Corrections automatiques de mots (mot erroné → correction)',
+                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=12,pady=(10,4))
+        lf=tk.Frame(tab2,bg=C_CARD); lf.pack(fill='both',expand=True,padx=12,pady=(0,4))
+        self.corr_list=tk.Listbox(lf,font=('Courier',9),bg=C_ENTRY_BG,fg=C_TEXT,
+            selectbackground=C_ACCENT,relief='flat',borderwidth=0,activestyle='none')
+        sb2=tk.Scrollbar(lf,command=self.corr_list.yview,bg=C_PANEL)
+        self.corr_list.config(yscrollcommand=sb2.set)
+        sb2.pack(side='right',fill='y'); self.corr_list.pack(side='left',fill='both',expand=True)
+        self._refresh_corr()
+        af=tk.Frame(tab2,bg=C_CARD); af.pack(fill='x',padx=12,pady=(0,8))
+        tk.Label(af,text="Erroné :",bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(side='left')
+        self.cw=tk.Entry(af,width=16,bg=C_ENTRY_BG,fg=C_TEXT,insertbackground=C_TEXT,relief='flat',font=('Helvetica',9))
+        self.cw.pack(side='left',padx=(4,8))
+        tk.Label(af,text="→",bg=C_CARD,fg=C_TEXT2,font=('Helvetica',10)).pack(side='left')
+        self.cr=tk.Entry(af,width=16,bg=C_ENTRY_BG,fg=C_TEXT,insertbackground=C_TEXT,relief='flat',font=('Helvetica',9))
+        self.cr.pack(side='left',padx=(4,8))
+        tk.Button(af,text="Ajouter",command=self._add_corr,bg=C_ACCENT,fg='white',relief='flat',padx=8,pady=3,cursor='hand2').pack(side='left',padx=4)
+        tk.Button(af,text="Supprimer",command=self._del_corr,bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=8,pady=3,cursor='hand2').pack(side='left')
+
+        # Onglet 3 — Mots acceptés
+        tab3=tk.Frame(nb,bg=C_CARD); nb.add(tab3,text='  ✅  Mots acceptés  ')
+        tk.Label(tab3,text="Mots que l'outil ne signalera plus comme inconnus.",
+                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=12,pady=(10,4))
+        of=tk.Frame(tab3,bg=C_CARD); of.pack(fill='both',expand=True,padx=12,pady=(0,4))
+        self.ok_list=tk.Listbox(of,font=('Courier',9),bg=C_ENTRY_BG,fg=C_TEXT,
+            selectbackground=C_ACCENT,relief='flat',borderwidth=0,activestyle='none')
+        sb3=tk.Scrollbar(of,command=self.ok_list.yview,bg=C_PANEL)
+        self.ok_list.config(yscrollcommand=sb3.set)
+        sb3.pack(side='right',fill='y'); self.ok_list.pack(side='left',fill='both',expand=True)
+        for w in sorted(self.cfg.get('known_ok',[])): self.ok_list.insert('end',f'  {w}')
+        bf3=tk.Frame(tab3,bg=C_CARD); bf3.pack(fill='x',padx=12,pady=(0,8))
+        tk.Button(bf3,text="Supprimer la sélection",command=self._del_ok,bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
+        tk.Button(bf3,text="Tout effacer",command=self._clear_ok,bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left',padx=8)
+
+        # Boutons bas
+        bot=tk.Frame(self,bg=C_BG); bot.pack(fill='x',padx=12,pady=(0,12))
+        tk.Button(bot,text="✓ Enregistrer",command=self._save,bg=C_SUCCESS,fg='white',
+                  font=('Helvetica',10,'bold'),padx=20,pady=6,relief='flat',cursor='hand2').pack(side='right')
+        tk.Button(bot,text="Annuler",command=self.destroy,bg=C_PANEL,fg=C_TEXT2,
+                  font=('Helvetica',10),padx=14,pady=6,relief='flat',cursor='hand2').pack(side='right',padx=8)
+
+    def _refresh_corr(self):
+        self.corr_list.delete(0,'end')
+        for w,r in sorted(self.cfg.get('corrections',{}).items()):
+            self.corr_list.insert('end',f'  {w}  →  {r}')
+
+    def _reset_bl(self):
+        self.bl_text.delete('1.0','end')
+        self.bl_text.insert('end','\n'.join(DEFAULT_BLACKLIST))
+
+    def _add_corr(self):
+        w=self.cw.get().strip(); r=self.cr.get().strip()
+        if w and r:
+            self.cfg.setdefault('corrections',{})[w]=r
+            self._refresh_corr()
+            self.cw.delete(0,'end'); self.cr.delete(0,'end')
+
+    def _del_corr(self):
+        sel=self.corr_list.curselection()
+        if sel:
+            line=self.corr_list.get(sel[0]).strip()
+            wrong=line.split('→')[0].strip()
+            self.cfg.get('corrections',{}).pop(wrong,None)
+            self._refresh_corr()
+
+    def _del_ok(self):
+        sel=self.ok_list.curselection()
+        if sel:
+            word=self.ok_list.get(sel[0]).strip()
+            ok_l=self.cfg.get('known_ok',[])
+            if word in ok_l: ok_l.remove(word)
+            self.ok_list.delete(sel[0])
+
+    def _clear_ok(self):
+        self.cfg['known_ok']=[]; self.ok_list.delete(0,'end')
+
+    def _save(self):
+        lines=[l.strip() for l in self.bl_text.get('1.0','end').splitlines() if l.strip()]
+        self.cfg['blacklist']=lines
+        save_config(self.cfg)
+        self.on_save()
+        self.destroy()
+
+# ── Application principale ────────────────────────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Rapport Cleaner — Loading Systems")
         self.resizable(False, False)
-        self.configure(bg='#f0f0f0')
-
+        self.configure(bg=C_BG)
         self.cfg = load_config()
         self.pdf_path = tk.StringVar()
         self.out_path = tk.StringVar()
-
         self._build_ui()
         self._center()
 
     def _center(self):
         self.update_idletasks()
-        w, h = self.winfo_width(), self.winfo_height()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w,h=self.winfo_width(),self.winfo_height()
+        sw,sh=self.winfo_screenwidth(),self.winfo_screenheight()
         self.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
 
     def _build_ui(self):
-        pad = {'padx':14,'pady':8}
+        # Barre accent en haut
+        tk.Frame(self,bg=C_ACCENT,height=4).pack(fill='x')
 
-        # Title
-        tk.Label(self, text="Rapport Cleaner", font=('Helvetica',16,'bold'),
-                 bg='#f0f0f0', fg='#222').pack(pady=(18,2))
-        tk.Label(self, text="Loading Systems — nettoyage automatique des rapports d'intervention",
-                 font=('Helvetica',9), bg='#f0f0f0', fg='#666').pack(pady=(0,14))
+        # Titre + bouton paramètres
+        title_f=tk.Frame(self,bg=C_BG); title_f.pack(fill='x',padx=20,pady=(16,8))
+        tk.Label(title_f,text="Rapport Cleaner",font=('Helvetica',18,'bold'),bg=C_BG,fg=C_TEXT).pack(side='left')
+        tk.Label(title_f,text="  Loading Systems",font=('Helvetica',11),bg=C_BG,fg=C_TEXT2).pack(side='left',pady=(4,0))
+        tk.Button(title_f,text="⚙  Paramètres",command=self._open_settings,
+                  bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=5,
+                  font=('Helvetica',9),cursor='hand2',
+                  activebackground=C_CARD,activeforeground=C_TEXT).pack(side='right')
 
-        # PDF input
-        frm1 = tk.LabelFrame(self, text=" Fichier source ", bg='#f0f0f0', font=('Helvetica',9))
-        frm1.pack(fill='x', **pad)
-        tk.Entry(frm1, textvariable=self.pdf_path, width=52,
-                 state='readonly').pack(side='left', padx=8, pady=8)
-        tk.Button(frm1, text="Parcourir...", command=self._pick_pdf,
-                  width=12).pack(side='left', padx=(0,8))
+        tk.Frame(self,bg=C_BORDER,height=1).pack(fill='x',padx=20)
 
-        # Output
-        frm2 = tk.LabelFrame(self, text=" Fichier de sortie ", bg='#f0f0f0', font=('Helvetica',9))
-        frm2.pack(fill='x', **pad)
-        tk.Entry(frm2, textvariable=self.out_path, width=52,
-                 state='readonly').pack(side='left', padx=8, pady=8)
-        tk.Button(frm2, text="Choisir...", command=self._pick_out,
-                  width=12).pack(side='left', padx=(0,8))
+        # Fichier source
+        self._section("Fichier source")
+        sf=tk.Frame(self,bg=C_PANEL); sf.pack(fill='x',padx=20,pady=(0,12))
+        si=tk.Frame(sf,bg=C_PANEL); si.pack(fill='x',padx=12,pady=10)
+        self.lbl_src=tk.Label(si,text="Aucun fichier sélectionné",bg=C_ENTRY_BG,fg=C_TEXT2,
+                              font=('Helvetica',9),anchor='w',padx=10,pady=8,width=55)
+        self.lbl_src.pack(side='left',fill='x',expand=True)
+        tk.Button(si,text="Parcourir...",command=self._pick_pdf,bg=C_ACCENT,fg='white',
+                  relief='flat',padx=14,pady=8,font=('Helvetica',9,'bold'),cursor='hand2',
+                  activebackground=C_ACCENT2,activeforeground='white').pack(side='left',padx=(8,0))
+
+        # Fichier de sortie
+        self._section("Fichier de sortie")
+        of=tk.Frame(self,bg=C_PANEL); of.pack(fill='x',padx=20,pady=(0,12))
+        oi=tk.Frame(of,bg=C_PANEL); oi.pack(fill='x',padx=12,pady=10)
+        self.lbl_out=tk.Label(oi,text="Aucun emplacement choisi",bg=C_ENTRY_BG,fg=C_TEXT2,
+                              font=('Helvetica',9),anchor='w',padx=10,pady=8,width=55)
+        self.lbl_out.pack(side='left',fill='x',expand=True)
+        tk.Button(oi,text="Choisir...",command=self._pick_out,bg=C_PANEL,fg=C_TEXT,
+                  relief='flat',padx=14,pady=8,font=('Helvetica',9),cursor='hand2',
+                  activebackground=C_CARD).pack(side='left',padx=(8,0))
 
         # Progress
-        self.progress = ttk.Progressbar(self, mode='indeterminate', length=400)
-        self.progress.pack(pady=(6,0))
+        pf=tk.Frame(self,bg=C_BG); pf.pack(fill='x',padx=20,pady=(0,4))
+        s=ttk.Style(); s.theme_use('default')
+        s.configure('Blue.Horizontal.TProgressbar',troughcolor=C_ENTRY_BG,
+                    background=C_ACCENT,borderwidth=0,lightcolor=C_ACCENT,darkcolor=C_ACCENT)
+        self.progress=ttk.Progressbar(pf,mode='indeterminate',length=560,
+                                      style='Blue.Horizontal.TProgressbar')
+        self.progress.pack(fill='x')
 
-        # Log
-        frm3 = tk.LabelFrame(self, text=" Journal ", bg='#f0f0f0', font=('Helvetica',9))
-        frm3.pack(fill='both', expand=True, **pad)
-        self.log_box = scrolledtext.ScrolledText(frm3, height=8, width=62,
-            font=('Courier',8), state='disabled', bg='#1e1e1e', fg='#d4d4d4')
-        self.log_box.pack(padx=8, pady=8)
+        # Journal
+        self._section("Journal")
+        lf=tk.Frame(self,bg=C_PANEL); lf.pack(fill='both',expand=True,padx=20,pady=(0,12))
+        self.log_box=scrolledtext.ScrolledText(lf,height=8,width=70,font=('Courier',8),
+            state='disabled',bg=C_ENTRY_BG,fg='#a8c0a0',insertbackground=C_TEXT,
+            relief='flat',borderwidth=0,padx=10,pady=8)
+        self.log_box.pack(fill='both',expand=True,padx=1,pady=1)
 
-        # Buttons
-        btn_frm = tk.Frame(self, bg='#f0f0f0')
-        btn_frm.pack(pady=(4,16))
-        self.btn_run = tk.Button(btn_frm, text="▶  Générer le PDF propre",
-            font=('Helvetica',11,'bold'), bg='#0066cc', fg='white',
-            padx=20, pady=8, command=self._run, state='disabled')
-        self.btn_run.pack(side='left', padx=8)
-        tk.Button(btn_frm, text="Effacer le journal", command=self._clear_log,
-                  padx=10, pady=8).pack(side='left', padx=8)
+        # Boutons bas
+        bf=tk.Frame(self,bg=C_BG); bf.pack(fill='x',padx=20,pady=(0,18))
+        self.btn_run=tk.Button(bf,text="▶   Générer le PDF propre",
+            font=('Helvetica',11,'bold'),bg=C_ACCENT,fg='white',
+            padx=24,pady=10,relief='flat',cursor='hand2',
+            activebackground=C_ACCENT2,activeforeground='white',
+            state='disabled',command=self._run)
+        self.btn_run.pack(side='left')
+        tk.Button(bf,text="Effacer le journal",command=self._clear_log,
+                  bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
+                  font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
+
+    def _section(self, label):
+        f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
+        tk.Label(f,text=label.upper(),font=('Helvetica',7,'bold'),bg=C_BG,fg=C_TEXT2).pack(side='left')
+        tk.Frame(f,bg=C_BORDER,height=1).pack(side='left',fill='x',expand=True,padx=(8,0),pady=4)
 
     def _pick_pdf(self):
-        path = filedialog.askopenfilename(
-            title="Choisir le rapport PDF",
+        path=filedialog.askopenfilename(title="Choisir le rapport PDF",
             filetypes=[("Fichiers PDF","*.pdf"),("Tous","*.*")])
         if path:
             self.pdf_path.set(path)
-            # Auto-suggest output path
-            base = os.path.splitext(path)[0]
-            self.out_path.set(base + '_clean.pdf')
+            name=os.path.basename(path)
+            self.lbl_src.config(text=f"  {name}",fg=C_TEXT)
+            out=os.path.splitext(path)[0]+'_clean.pdf'
+            self.out_path.set(out)
+            self.lbl_out.config(text=f"  {os.path.basename(out)}",fg=C_TEXT)
             self._check_ready()
-            self._log(f"📂 Fichier chargé : {os.path.basename(path)}")
+            self._log(f"📂 {name}")
 
     def _pick_out(self):
-        path = filedialog.asksaveasfilename(
-            title="Enregistrer le PDF nettoyé",
-            defaultextension=".pdf",
-            filetypes=[("Fichiers PDF","*.pdf")])
+        path=filedialog.asksaveasfilename(title="Enregistrer le PDF nettoyé",
+            defaultextension=".pdf",filetypes=[("Fichiers PDF","*.pdf")])
         if path:
             self.out_path.set(path)
+            self.lbl_out.config(text=f"  {os.path.basename(path)}",fg=C_TEXT)
             self._check_ready()
 
     def _check_ready(self):
@@ -662,7 +764,7 @@ class App(tk.Tk):
 
     def _log(self, msg):
         self.log_box.config(state='normal')
-        self.log_box.insert('end', msg + '\n')
+        self.log_box.insert('end', msg+'\n')
         self.log_box.see('end')
         self.log_box.config(state='disabled')
 
@@ -671,124 +773,93 @@ class App(tk.Tk):
         self.log_box.delete('1.0','end')
         self.log_box.config(state='disabled')
 
-    def _run(self):
-        pdf = self.pdf_path.get()
-        out = self.out_path.get()
-        if not pdf or not out: return
+    def _open_settings(self):
+        SettingsWindow(self, self.cfg,
+                       on_save=lambda: self._log("✓ Paramètres sauvegardés"))
 
+    def _run(self):
+        pdf=self.pdf_path.get(); out=self.out_path.get()
+        if not pdf or not out: return
         self.btn_run.config(state='disabled')
         self.progress.start(10)
-        self._log("\n─── Démarrage du traitement ───")
-
+        self._log("\n─── Démarrage ───")
         def worker():
             try:
-                self._log("Analyse de la structure du rapport...")
-                structure = detect_structure(pdf)
+                self._log("Analyse de la structure...")
+                structure=detect_structure(pdf)
                 if not structure:
-                    self._log("❌ Impossible de lire la structure du PDF.")
-                    return
-
-                self._log(f"Structure détectée : {structure.get('style','?')} — colonnes : {list(structure.get('data_cols',{}).keys()) or 'nom/commentaire'}")
-
-                # Check for unknown words and ask user
+                    self.after(0,lambda: self._log("❌ Impossible de lire le PDF.")); return
+                self._log(f"Structure : {structure.get('style')} — {list(structure.get('data_cols',{}).keys()) or 'nom/commentaire'}")
                 self._log("Analyse du vocabulaire...")
-                unknowns = detect_unknown_words(
-                    pdf, structure,
-                    self.cfg.get('corrections',{}),
-                    self.cfg.get('blacklist_extra',[]))
-
-                if unknowns:
-                    # Filter out already-known words from config
-                    known_already = set(self.cfg.get('corrections',{}).keys()) | \
-                                    set(self.cfg.get('known_ok',[]))
-                    new_unknowns = unknowns - known_already
-                    if new_unknowns:
-                        self.after(0, lambda u=new_unknowns: self._ask_unknowns(u, pdf, out, structure))
-                        return
-
-                self._do_generate(pdf, out, structure)
-
+                unknowns=detect_unknown_words(pdf,self.cfg.get('corrections',{}),self.cfg.get('blacklist',[]))
+                known_already=set(self.cfg.get('corrections',{}).keys())|set(self.cfg.get('known_ok',[]))
+                new_unknowns=unknowns-known_already
+                if new_unknowns:
+                    self.after(0,lambda u=new_unknowns: self._ask_unknowns(u,pdf,out,structure)); return
+                self._do_generate(pdf,out,structure)
             except Exception as e:
-                self.after(0, lambda: self._log(f"❌ Erreur : {e}"))
+                self.after(0,lambda: self._log(f"❌ Erreur : {e}"))
             finally:
-                self.after(0, self._stop_progress)
-
-        threading.Thread(target=worker, daemon=True).start()
+                self.after(0,self._stop_progress)
+        threading.Thread(target=worker,daemon=True).start()
 
     def _ask_unknowns(self, unknowns, pdf, out, structure):
-        """Show dialog for unknown words — ask user what to do with each."""
-        win = tk.Toplevel(self)
-        win.title("Mots inconnus détectés")
-        win.resizable(False, False)
-        win.grab_set()
-
-        tk.Label(win, text=f"Le rapport contient {len(unknowns)} mot(s) inhabituel(s).\nPour chacun, indiquez si c'est une faute de frappe ou un terme à ignorer.",
-                 font=('Helvetica',9), justify='left', padx=12, pady=8).pack()
-
-        frame = tk.Frame(win); frame.pack(padx=12, pady=4, fill='both', expand=True)
-        canvas = tk.Canvas(frame, height=min(300, len(unknowns)*42+20))
-        sb = tk.Scrollbar(frame, orient='vertical', command=canvas.yview)
+        win=tk.Toplevel(self); win.title("Mots inhabituels détectés")
+        win.configure(bg=C_BG); win.resizable(False,True); win.grab_set()
+        tk.Label(win,text=f"  {len(unknowns)} mot(s) inhabituel(s) trouvé(s). Que faire ?",
+                 font=('Helvetica',10,'bold'),bg=C_BG,fg=C_TEXT,pady=10).pack(anchor='w',padx=12)
+        tk.Label(win,text="  ✓ Garder = conserver tel quel   |   ✏ Corriger = remplacer   |   ✗ Ignorer = supprimer",
+                 font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(anchor='w',padx=12,pady=(0,8))
+        frame=tk.Frame(win,bg=C_BG); frame.pack(fill='both',expand=True,padx=12)
+        canvas=tk.Canvas(frame,bg=C_BG,highlightthickness=0,height=min(320,len(unknowns)*46+10))
+        sb=tk.Scrollbar(frame,orient='vertical',command=canvas.yview,bg=C_PANEL)
         canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side='right', fill='y'); canvas.pack(side='left', fill='both', expand=True)
-        inner = tk.Frame(canvas); canvas.create_window((0,0), window=inner, anchor='nw')
-
-        decisions = {}  # word -> {'action': 'ok'/'correction'/'blacklist', 'value': str}
-
+        sb.pack(side='right',fill='y'); canvas.pack(side='left',fill='both',expand=True)
+        inner=tk.Frame(canvas,bg=C_BG); canvas.create_window((0,0),window=inner,anchor='nw')
+        decisions={}
         for word in sorted(unknowns):
-            row_f = tk.Frame(inner); row_f.pack(fill='x', pady=3, padx=4)
-            tk.Label(row_f, text=f"  «{word}»", font=('Courier',9,'bold'), width=20, anchor='w').pack(side='left')
-            action = tk.StringVar(value='ok')
-            correction = tk.StringVar(value=word)
-
-            tk.Radiobutton(row_f, text="OK, garder", variable=action, value='ok').pack(side='left')
-            tk.Radiobutton(row_f, text="Corriger en :", variable=action, value='correction').pack(side='left')
-            tk.Entry(row_f, textvariable=correction, width=16).pack(side='left')
-            tk.Radiobutton(row_f, text="Ignorer/supprimer", variable=action, value='blacklist').pack(side='left')
-            decisions[word] = (action, correction)
-
-        inner.update_idletasks()
-        canvas.config(scrollregion=canvas.bbox('all'))
-
+            rf=tk.Frame(inner,bg=C_CARD,pady=6); rf.pack(fill='x',pady=2,padx=4)
+            tk.Label(rf,text=f"  «{word}»",font=('Courier',9,'bold'),bg=C_CARD,fg=C_TEXT,width=22,anchor='w').pack(side='left')
+            action=tk.StringVar(value='ok'); correction=tk.StringVar(value=word)
+            for val,lbl in [('ok','✓ Garder'),('correction','✏ Corriger :'),('blacklist','✗ Ignorer')]:
+                tk.Radiobutton(rf,text=lbl,variable=action,value=val,bg=C_CARD,fg=C_TEXT,
+                               selectcolor=C_ACCENT,activebackground=C_CARD,font=('Helvetica',8)).pack(side='left',padx=4)
+            tk.Entry(rf,textvariable=correction,width=14,bg=C_ENTRY_BG,fg=C_TEXT,
+                     insertbackground=C_TEXT,relief='flat',font=('Helvetica',9)).pack(side='left',padx=4)
+            decisions[word]=(action,correction)
+        inner.update_idletasks(); canvas.config(scrollregion=canvas.bbox('all'))
         def confirm():
-            for word, (action_var, corr_var) in decisions.items():
-                act = action_var.get()
-                if act == 'correction':
-                    self.cfg.setdefault('corrections',{})[word] = corr_var.get()
-                elif act == 'blacklist':
-                    if word not in self.cfg.setdefault('blacklist_extra',[]):
-                        self.cfg['blacklist_extra'].append(rf'\b{re.escape(word)}\b')
+            for word,(av,cv) in decisions.items():
+                act=av.get()
+                if act=='correction': self.cfg.setdefault('corrections',{})[word]=cv.get()
+                elif act=='blacklist':
+                    bl=self.cfg.setdefault('blacklist',[])
+                    if word not in bl: bl.append(word)
                 else:
-                    self.cfg.setdefault('known_ok',[])
-                    if word not in self.cfg['known_ok']:
-                        self.cfg['known_ok'].append(word)
+                    ok=self.cfg.setdefault('known_ok',[])
+                    if word not in ok: ok.append(word)
             save_config(self.cfg)
+            self._log(f"✓ {len(decisions)} mot(s) traité(s)")
             win.destroy()
-            self._log(f"✓ {len(decisions)} mot(s) traité(s), configuration sauvegardée")
-            self._do_generate(pdf, out, structure)
-
-        tk.Button(win, text="✓ Confirmer et générer", command=confirm,
-                  bg='#0066cc', fg='white', font=('Helvetica',10,'bold'),
-                  padx=16, pady=6).pack(pady=10)
+            self._do_generate(pdf,out,structure)
+        tk.Button(win,text="✓ Confirmer et générer",command=confirm,bg=C_SUCCESS,fg='white',
+                  font=('Helvetica',10,'bold'),padx=20,pady=8,relief='flat',cursor='hand2').pack(pady=12)
 
     def _do_generate(self, pdf, out, structure):
         def worker():
             try:
-                generate_pdf(
-                    pdf, out, structure,
+                generate_pdf(pdf,out,structure,
                     self.cfg.get('corrections',{}),
-                    self.cfg.get('blacklist_extra',[]),
-                    log_fn=lambda m: self.after(0, lambda msg=m: self._log(msg))
-                )
-                self.after(0, lambda: messagebox.showinfo(
-                    "Terminé",
-                    f"PDF généré avec succès !\n\n{out}"))
+                    self.cfg.get('blacklist',[]),
+                    log_fn=lambda m: self.after(0,lambda msg=m: self._log(msg)))
+                self.after(0,lambda: messagebox.showinfo("Terminé ✓",f"PDF généré avec succès !\n\n{out}"))
             except Exception as e:
-                self.after(0, lambda: self._log(f"❌ Erreur : {e}"))
-                self.after(0, lambda: messagebox.showerror("Erreur", str(e)))
+                self.after(0,lambda: self._log(f"❌ Erreur : {e}"))
+                self.after(0,lambda: messagebox.showerror("Erreur",str(e)))
             finally:
-                self.after(0, self._stop_progress)
-                self.after(0, lambda: self.btn_run.config(state='normal'))
-        threading.Thread(target=worker, daemon=True).start()
+                self.after(0,self._stop_progress)
+                self.after(0,lambda: self.btn_run.config(state='normal'))
+        threading.Thread(target=worker,daemon=True).start()
 
     def _stop_progress(self):
         self.progress.stop()
