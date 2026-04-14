@@ -299,12 +299,15 @@ def generate_pdf(pdf_path, output_path, structure, corrections, extra_blacklist,
     n_col = structure.get('n_col', 1)
 
     log("Extraction des images...")
-    # For image mapping, use the N column (quai number), not # index
+    # For image mapping, use the N column (quai number), not the # column
     img_n_col = structure.get('n_col', 1)
-    # If # is col 0 and N is col 1, use col 1 for image mapping
     if img_n_col == 0 and structure.get('style') == 'standard':
         img_n_col = 1
+    # For nom_commentaire style, images are mapped by N° série (col 0)
+    if structure.get('style') == 'nom_commentaire':
+        img_n_col = 0
     img_map = extract_and_map_images(pdf_path, img_dir, n_col=img_n_col)
+    log(f"  → {sum(len(v) for v in img_map.values())} image(s) extraite(s) pour {len(img_map)} ligne(s)")
 
     log("Lecture du tableau...")
 
@@ -366,7 +369,6 @@ def _read_nom_commentaire(pdf_path, corrections, extra_blacklist):
                 elif re.search(r'\bsas\b', nom, re.IGNORECASE):
                     m = re.search(r'(?:abloy)\s+(\d+)', nom, re.IGNORECASE) or re.search(r'(\d+)\s*$', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['sas']=(serie,com)
-
     rows_data = []
     for qn in sorted(quais.keys()):
         d = quais[qn]
@@ -428,8 +430,11 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         if style == 'nom_commentaire' and quais:
             qn = int(n)
             d = quais.get(qn, {})
-            ps = d.get('porte',('',''))[0]; ns_s = d.get('niv',('',''))[0]
-            imgs = img_map.get(ps,[]) + img_map.get(ns_s,[])
+            ps = d.get('porte',('',''))[0]
+            ns_s = d.get('niv',('',''))[0]
+            ss_s = d.get('sas',('',''))[0]
+            imgs = (img_map.get(ps,[]) + img_map.get(ns_s,[]) +
+                    img_map.get(ss_s,[]))
         else:
             imgs = img_map.get(n, [])
 
