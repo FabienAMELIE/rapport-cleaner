@@ -1,0 +1,45 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installer les dépendances
+        run: |
+          pip install pyinstaller pdfplumber reportlab pillow
+
+      - name: Compiler le .exe
+        run: |
+          pyinstaller --onefile --windowed `
+            --name "RapportCleaner" `
+            --hidden-import pdfplumber `
+            --hidden-import pdfminer `
+            --hidden-import reportlab `
+            --hidden-import PIL `
+            --hidden-import tkinter `
+            --hidden-import tkinter.ttk `
+            --hidden-import tkinter.scrolledtext `
+            --hidden-import tkinter.filedialog `
+            --hidden-import tkinter.messagebox `
+            rapport_cleaner.py
+
+      - name: Publier le .exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: RapportCleaner-Windows
+          path: dist/RapportCleaner.exe
+          retention-days: 30
