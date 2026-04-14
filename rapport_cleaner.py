@@ -289,15 +289,22 @@ def extract_and_map_images(pdf_path, img_dir, n_col=1):
     return img_map
 
 def generate_pdf(pdf_path, output_path, structure, corrections, extra_blacklist, log_fn=None):
+    import tempfile
     def log(msg):
         if log_fn: log_fn(msg)
 
     style = structure.get('style', 'standard')
-    img_dir = os.path.join(os.path.dirname(output_path), '_rapport_imgs_tmp')
+    # Use system temp dir to avoid permission issues on Windows
+    img_dir = os.path.join(tempfile.gettempdir(), 'rapport_cleaner_imgs')
     n_col = structure.get('n_col', 1)
 
     log("Extraction des images...")
-    img_map = extract_and_map_images(pdf_path, img_dir, n_col=n_col)
+    # For image mapping, use the N column (quai number), not # index
+    img_n_col = structure.get('n_col', 1)
+    # If # is col 0 and N is col 1, use col 1 for image mapping
+    if img_n_col == 0 and structure.get('style') == 'standard':
+        img_n_col = 1
+    img_map = extract_and_map_images(pdf_path, img_dir, n_col=img_n_col)
 
     log("Lecture du tableau...")
 
@@ -310,7 +317,6 @@ def generate_pdf(pdf_path, output_path, structure, corrections, extra_blacklist,
     log("Génération du PDF...")
     _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log)
     log(f"✓ PDF généré : {output_path}")
-
 def _read_standard(pdf_path, structure, corrections, extra_blacklist):
     dc = structure.get('data_cols', {})
     n_col = structure.get('n_col', 0)
