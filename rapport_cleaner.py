@@ -27,13 +27,13 @@ THEMES = {
         'C_ENTRY_BG': '#ffffff',
     },
     'sombre': {
-        'C_BG':       '#1e2330',
-        'C_PANEL':    '#252b3b',
-        'C_CARD':     '#2d3447',
-        'C_BORDER':   '#3a4257',
+        'C_BG':       '#1e1e1e',
+        'C_PANEL':    '#252526',
+        'C_CARD':     '#2d2d2d',
+        'C_BORDER':   '#3e3e3e',
         'C_TEXT':     '#e8eaf0',
-        'C_TEXT2':    '#8b93a8',
-        'C_ENTRY_BG': '#1a1f2e',
+        'C_TEXT2':    '#aaaaaa',
+        'C_ENTRY_BG': '#3c3c3c',
     },
 }
 
@@ -590,7 +590,7 @@ class SettingsWindow(tk.Toplevel):
         self.theme_var=tk.StringVar(value=self.cfg.get('theme','clair'))
         for val,lbl in [('clair','☀  Mode clair'),('sombre','🌙  Mode sombre')]:
             tk.Radiobutton(theme_f,text=lbl,variable=self.theme_var,value=val,
-                           bg=C_CARD,fg=C_TEXT,selectcolor=C_ACCENT,
+                           bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
                            activebackground=C_CARD,font=('Helvetica',9),padx=12).pack(side='left',padx=4)
         tk.Label(tab0,text="Le changement de thème sera appliqué au prochain démarrage de l'application.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),wraplength=580).pack(anchor='w',padx=16,pady=(8,0))
@@ -922,7 +922,7 @@ class App(tk.Tk):
             action=tk.StringVar(value='ok'); correction=tk.StringVar(value=word)
             for val,lbl in [('ok','✓ Garder'),('correction','✏ Corriger :'),('blacklist','✗ Ignorer')]:
                 tk.Radiobutton(rf,text=lbl,variable=action,value=val,bg=C_CARD,fg=C_TEXT,
-                               selectcolor=C_ACCENT,activebackground=C_CARD,font=('Helvetica',8)).pack(side='left',padx=4)
+                               selectcolor=C_CARD,activebackground=C_CARD,font=('Helvetica',8)).pack(side='left',padx=4)
             tk.Entry(rf,textvariable=correction,width=14,bg=C_ENTRY_BG,fg=C_TEXT,
                      insertbackground=C_TEXT,relief='flat',font=('Helvetica',9)).pack(side='left',padx=4)
             decisions[word]=(action,correction)
