@@ -6,6 +6,11 @@ Nettoie automatiquement les rapports d'intervention PDF de techniciens.
 import os, re, sys, json, threading, tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+
+def resource_path(filename):
+    """Retourne le chemin absolu vers une ressource (compatible PyInstaller)."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, filename)
 import pdfplumber
 from PIL import Image as PILImage
 from reportlab.lib.pagesizes import landscape, A4
@@ -758,6 +763,17 @@ class App(tk.Tk):
         self.configure(bg=C_BG)
         self.pdf_path = tk.StringVar()
         self.out_path = tk.StringVar()
+
+        # Icône barre des tâches
+        try:
+            from PIL import ImageTk
+            _ico_path = resource_path('1631305813263.jpg')
+            _ico_img = ImageTk.PhotoImage(file=_ico_path)
+            self.iconphoto(True, _ico_img)
+            self._ico_ref = _ico_img  # éviter le garbage collector
+        except Exception:
+            pass
+
         self._build_ui()
         self._center()
 
@@ -771,10 +787,27 @@ class App(tk.Tk):
         # Barre accent en haut
         tk.Frame(self,bg=C_ACCENT,height=4).pack(fill='x')
 
-        # Titre + bouton paramètres
-        title_f=tk.Frame(self,bg=C_BG); title_f.pack(fill='x',padx=20,pady=(16,8))
-        tk.Label(title_f,text="Rapport Cleaner",font=('Helvetica',18,'bold'),bg=C_BG,fg=C_TEXT).pack(side='left')
-        tk.Label(title_f,text="  Loading Systems",font=('Helvetica',11),bg=C_BG,fg=C_TEXT2).pack(side='left',pady=(4,0))
+        # Titre + logo + bouton paramètres
+        title_f=tk.Frame(self,bg=C_BG); title_f.pack(fill='x',padx=20,pady=(14,8))
+
+        # Logo Loading Systems (page d'accueil)
+        try:
+            from PIL import ImageTk, Image as PILImg
+            _logo_path = resource_path('logoloadingsystemspng_5c2f7debbf555.png')
+            _logo_pil = PILImg.open(_logo_path)
+            # Redimensionner à hauteur 38px en conservant le ratio
+            _lh = 38
+            _lw = int(_logo_pil.width * _lh / _logo_pil.height)
+            _logo_pil = _logo_pil.resize((_lw, _lh), PILImg.LANCZOS)
+            _logo_tk = ImageTk.PhotoImage(_logo_pil)
+            lbl_logo = tk.Label(title_f, image=_logo_tk, bg=C_BG)
+            lbl_logo.image = _logo_tk  # éviter le garbage collector
+            lbl_logo.pack(side='left', padx=(0, 14))
+        except Exception:
+            # Fallback texte si PIL indisponible
+            tk.Label(title_f,text="Rapport Cleaner",font=('Helvetica',18,'bold'),bg=C_BG,fg=C_TEXT).pack(side='left')
+            tk.Label(title_f,text="  Loading Systems",font=('Helvetica',11),bg=C_BG,fg=C_TEXT2).pack(side='left',pady=(4,0))
+
         tk.Button(title_f,text="⚙  Paramètres",command=self._open_settings,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=5,
                   font=('Helvetica',9),cursor='hand2',
