@@ -378,8 +378,22 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
             tables = page.extract_tables()
             if not tables: continue
             for row in tables[0]:
-                if not row or not row[n_col]: continue
-                n = fix_word_breaks(row[n_col]).strip()
+                if not row: continue
+                n_raw = row[n_col] if n_col < len(row) else ''
+                # Ligne sans numéro : note globale technicien
+                if not n_raw or not n_raw.strip():
+                    # Chercher du contenu dans les colonnes de données
+                    note_parts = []
+                    for role in col_order:
+                        idx = dc.get(role)
+                        raw = row[idx] if idx is not None and idx < len(row) and row[idx] else ''
+                        if raw.strip():
+                            note_parts.append(fix_word_breaks(raw).strip())
+                    if note_parts:
+                        note_text = ' / '.join(note_parts)
+                        rows_data.append((len(rows_data), '__NOTE__') + (note_text,) + tuple(['']*6))
+                    continue
+                n = fix_word_breaks(n_raw).strip()
                 if not n or n in ('N','N°','#','Numéros','∑') or n in seen: continue
                 if re.search(r'[a-zA-Z]{3,}', n) and not re.search(r'\d', n):
                     if n.lower() in ('n','n°','numéros','image','photo','porte','niveleur','sas'): continue
@@ -445,10 +459,13 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
         ('ROWHEIGHT',(0,0),(-1,0),10*mm),
     ]
+    cm = {r: i for i, r in enumerate(col_order)}
     alt = 0
     for row in rows_data:
-        n = row[1]; fields = list(row[2:])
-        active_fields = fields[:len(active_cols)]
+        n = row[1]
+        if n == '__NOTE__': continue  # notes globales → récap uniquement
+        fields = list(row[2:])
+        active_fields = [fields[cm[r]] if cm[r] < len(fields) else '' for r in active_cols]
         if not any(f.strip() for f in active_fields): continue
         if style=='nom_commentaire' and quais:
             qn=int(n); d=quais.get(qn,{})
@@ -466,26 +483,27 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         alt+=1
 
     # Summary
+    col_order_cm = {r: i for i, r in enumerate(col_order)}
     summary_rows=[]
     for row in rows_data:
-        n=row[1]; fields=list(row[2:])
+        n=row[1]
+        if n == '__NOTE__': continue
+        fields=list(row[2:])
         if style=='nom_commentaire':
             summary_rows.append((0,n,fields[0] if len(fields)>0 else '',
                                    fields[1] if len(fields)>1 else '',
                                    fields[2] if len(fields)>2 else '','',''))
         else:
-            cm={r:i for i,r in enumerate(active_cols)}
-            summary_rows.append((0,n,
-                fields[cm['porte']] if 'porte' in cm else '',
-                fields[cm['niv']]   if 'niv'   in cm else '',
-                fields[cm['sas']]   if 'sas'   in cm else '','',''))
+            # Passer toutes les colonnes actives (pas seulement porte/niv/sas)
+            row_fields = [fields[col_order_cm[r]] if col_order_cm[r] < len(fields) else '' for r in active_cols]
+            summary_rows.append((0, n) + tuple(row_fields))
 
     fname = os.path.splitext(os.path.basename(output_path))[0]
     # Nettoyer le nom : supprimer uniquement les suffixes qu'on rajoute (clean, v1, v2, v3...)
     raw_title = fname.replace('_',' ').replace('-',' ')
     société = re.sub(r'\s*[\-_]?\s*(?:clean\s*(?:v\d+)?|v\d+)\s*$', '', raw_title, flags=re.IGNORECASE).strip()
     société = re.sub(r'\s{2,}', ' ', société).strip()
-    story = _build_summary(summary_rows, société)
+    story = _build_summary(summary_rows, société, active_cols)
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
@@ -493,19 +511,28 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     doc.build(story)
 
-def _build_summary(rows_data, title):
+def _build_summary(rows_data, title, active_cols=None):
+    if active_cols is None: active_cols = ['porte','niv','sas']
     ts=ParagraphStyle('ts',fontSize=13,fontName='Helvetica-Bold',spaceAfter=8,alignment=1)
     ns=ParagraphStyle('n',fontSize=8.5,fontName='Helvetica',textColor=colors.HexColor('#333333'),spaceAfter=4,leading=13)
+    note_style=ParagraphStyle('note',fontSize=8.5,fontName='Helvetica-Oblique',
+        textColor=colors.HexColor('#555555'),spaceAfter=4,leading=13)
     def eq(seg):
         m=re.match(r'^\s*(\d+)\s*(?:x\s*)?',seg.strip()); return int(m.group(1)) if m else 1
-    cats={}; tcats={}; vns=[]
+    cats={}; tcats={}; vns=[]; notes=[]
     def add(c,n,q=1): cats.setdefault(c,{}); cats[c][n]=cats[c].get(n,0)+q
     def addt(l,n,q=1): tcats.setdefault(l,{}); tcats[l][n]=tcats[l].get(n,0)+q
+    sas_ci = active_cols.index('sas') if 'sas' in active_cols else -1
     for row in rows_data:
         n=row[1]
+        # Notes globales technicien — afficher dans récap, ne pas analyser
+        if n == '__NOTE__':
+            note_text = row[2] if len(row) > 2 else ''
+            if note_text: notes.append(note_text)
+            continue
         for ci,f in enumerate(row[2:]):
             if not f: continue
-            fl=f.lower(); is_sas=(ci==2)
+            fl=f.lower(); is_sas=(ci==sas_ci)
             if 'vidange' in fl or 'hydraulique' in fl:
                 if n not in vns: vns.append(n)
             elif is_sas and ('tendeur' in fl or 'crochet' in fl or
@@ -578,7 +605,12 @@ def _build_summary(rows_data, title):
                 if 'devis' in fl: add('Devis en cours',n); matched=True
                 if 'cellule' in fl or 'asservissement' in fl: add('Absence cellule asservissement',n); matched=True
                 if is_sas and 'tendeur' in fl: addt('Tendeur L (long)',n,eq(fl)); matched=True
-                if not matched: add('Autre',n)
+                if not matched:
+                    # Entrées dynamiques : découper sur séparateurs et compter chaque élément
+                    segments = [s.strip() for s in re.split(r'\s*[+/,]\s*', f.strip()) if s.strip()]
+                    for seg in segments:
+                        label = seg.strip().rstrip('.')
+                        if label: add(label, n)
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
         return f"<b>{lbl}</b> ({tot}) : {', '.join(parts)}"
@@ -617,6 +649,8 @@ def _build_summary(rows_data, title):
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     for lbl in sorted(tcats.keys()): story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
     for c,d in cats.items(): story.append(Paragraph(fmt(c,d),ns))
+    for note in notes:
+        story.append(Paragraph(f"<b>Note technicien :</b> {note}", note_style))
     story.append(Spacer(1,6))
     story.append(Table([['']],colWidths=[257*mm],style=TableStyle([('LINEABOVE',(0,0),(-1,-1),0.5,colors.HexColor('#cccccc'))])))
     story.append(Spacer(1,6))
