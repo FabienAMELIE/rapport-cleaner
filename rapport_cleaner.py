@@ -467,7 +467,11 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
                 fields[cm['sas']]   if 'sas'   in cm else '','',''))
 
     fname = os.path.splitext(os.path.basename(output_path))[0]
-    story = _build_summary(summary_rows, fname.replace('_',' ').replace('-',' '))
+    # Nettoyer le nom : supprimer uniquement les suffixes qu'on rajoute (clean, v1, v2, v3...)
+    raw_title = fname.replace('_',' ').replace('-',' ')
+    société = re.sub(r'\s*[\-_]?\s*(?:clean\s*(?:v\d+)?|v\d+)\s*$', '', raw_title, flags=re.IGNORECASE).strip()
+    société = re.sub(r'\s{2,}', ' ', société).strip()
+    story = _build_summary(summary_rows, société)
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
@@ -548,9 +552,37 @@ def _build_summary(rows_data, title):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
         return f"<b>{lbl}</b> ({tot}) : {', '.join(parts)}"
     # Titre centré : "Nom société — Rapport d'intervention"
-    société = re.sub(r'[\s_\-]+clean$','', title, flags=re.IGNORECASE).strip()
-    titre_final = f"{société} — Rapport d'intervention"
-    story=[Paragraph(titre_final, ts)]
+    titre_final = f"{title} — Rapport d'intervention"
+
+    # Logo en haut à droite
+    story = []
+    logo_path = resource_path('1631305813263.jpg')
+    if os.path.exists(logo_path):
+        try:
+            logo_h = 14*mm
+            with PILImage.open(logo_path) as im:
+                lw, lh = im.size
+            logo_w = logo_h * lw / lh
+            logo = RLImage(logo_path, width=logo_w, height=logo_h)
+            # Tableau 1 ligne : titre centré + logo à droite
+            header_table = Table(
+                [[Paragraph(titre_final, ts), logo]],
+                colWidths=[247*mm, logo_w + 4*mm]
+            )
+            header_table.setStyle(TableStyle([
+                ('ALIGN',    (0,0),(0,0), 'CENTER'),
+                ('ALIGN',    (1,0),(1,0), 'RIGHT'),
+                ('VALIGN',   (0,0),(-1,-1), 'MIDDLE'),
+                ('LEFTPADDING',  (0,0),(-1,-1), 0),
+                ('RIGHTPADDING', (0,0),(-1,-1), 0),
+                ('TOPPADDING',   (0,0),(-1,-1), 0),
+                ('BOTTOMPADDING',(0,0),(-1,-1), 4),
+            ]))
+            story.append(header_table)
+        except:
+            story.append(Paragraph(titre_final, ts))
+    else:
+        story.append(Paragraph(titre_final, ts))
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     for lbl in sorted(tcats.keys()): story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
     for c,d in cats.items(): story.append(Paragraph(fmt(c,d),ns))
