@@ -212,10 +212,11 @@ def detect_structure(pdf_path):
         header = [fix_word_breaks(c).strip().lower() if c else '' for c in tables[0][0]]
     if any('nom' in h for h in header) and any('commentaire' in h for h in header):
         return {'style': 'nom_commentaire', 'headers': header}
-    data_cols = {}; n_col = None
+    data_cols = {}; n_col = None; n_photos = 0
     for i, h in enumerate(header):
         if re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$', h): n_col = i
         elif re.search(r'\bn\b|numéro', h) and n_col is None: n_col = i
+        elif re.search(r'^photos?\+?$|^images?$', h): n_photos += 1
         elif re.search(r'porte', h): data_cols['porte'] = i
         elif re.search(r'niveleur|quai', h): data_cols['niv'] = i
         elif re.search(r'sas', h): data_cols['sas'] = i
@@ -224,7 +225,10 @@ def detect_structure(pdf_path):
         elif re.search(r'cale', h): data_cols['cale'] = i
         elif re.search(r'chandelle', h): data_cols['chandelle'] = i
     if n_col is None: n_col = 0
-    return {'style': 'standard', 'headers': header, 'n_col': n_col, 'data_cols': data_cols}
+    # Clamp entre 2 et 6
+    n_photos = max(2, min(6, n_photos)) if n_photos > 0 else 3
+    return {'style': 'standard', 'headers': header, 'n_col': n_col,
+            'data_cols': data_cols, 'n_photos': n_photos}
 
 def detect_unknown_words(pdf_path, corrections, blacklist):
     KNOWN = {
@@ -276,9 +280,16 @@ def make_img(name, img_dir):
     if not os.path.exists(path): return ''
     try:
         with PILImage.open(path) as im: w, h = im.size
-        mh, mw = 20*mm, 23*mm; r = w/h
-        rw = min(mw, mh*r) if r>=1 else (min(mh, mw/r)*r)
-        rh = rw/r if r>=1 else min(mh, mw/r)
+        # Max dimensions légèrement inférieures à la cellule pour éviter tout débordement
+        mh, mw = 19*mm, 21*mm
+        r = w/h
+        if r >= 1:
+            rw = min(mw, mh*r); rh = rw/r
+        else:
+            rh = min(mh, mw/r); rw = rh*r
+        # Sécurité : jamais plus grand que la cellule
+        if rh > mh: rw = rw * mh/rh; rh = mh
+        if rw > mw: rh = rh * mw/rw; rw = mw
         return RLImage(path, width=rw, height=rh)
     except: return ''
 
@@ -415,7 +426,8 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     active_cols = [r for r in col_order if r in dc] if style=='standard' else ['porte','niv','sas']
     COL_LABELS = {'porte':'Porte sectionnelle','niv':'Niveleur / Quai','sas':'SAS',
                   'but':'Butoire','rideau':'Rideau','cale':'Cale','chandelle':'Chandelle'}
-    N_PHOTOS=4; N_IMG_W=22*mm; N_COL_W=14*mm
+    N_PHOTOS = structure.get('n_photos', 3) if style=='standard' else 3
+    N_IMG_W=23*mm; N_COL_W=14*mm
     page_w = landscape(A4)[0]-20*mm
     data_col_w = (page_w - N_PHOTOS*N_IMG_W - N_COL_W) / max(len(active_cols),1)
     col_widths = [N_COL_W]+[data_col_w]*len(active_cols)+[N_IMG_W]*N_PHOTOS
@@ -448,7 +460,7 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         table_data.append([make_cell(n,bold=True,size=7.5)]+data_cells+img_cells)
         idx=len(table_data)-1
         style_cmds.append(('BACKGROUND',(0,idx),(-1,idx),colors.HexColor('#f2f2f2') if alt%2==0 else colors.white))
-        style_cmds.append(('ROWHEIGHT',(0,idx),(-1,idx),22*mm if imgs else 7*mm))
+        style_cmds.append(('ROWHEIGHT',(0,idx),(-1,idx),21*mm if imgs else 7*mm))
         alt+=1
 
     # Summary
@@ -966,33 +978,71 @@ class App(tk.Tk):
 
     def _ask_unknowns(self, unknowns, pdf, out, structure):
         win=tk.Toplevel(self); win.title("Mots inhabituels détectés")
-        win.configure(bg=C_BG); win.resizable(False,True); win.grab_set()
+        win.configure(bg=C_BG); win.resizable(True,True)
+        win.geometry("680x500"); win.grab_set()
+
         tk.Label(win,text=f"  {len(unknowns)} mot(s) inhabituel(s) trouvé(s). Que faire ?",
                  font=('Helvetica',10,'bold'),bg=C_BG,fg=C_TEXT,pady=10).pack(anchor='w',padx=12)
-        tk.Label(win,text="  ✓ Garder = conserver tel quel   |   ✏ Corriger = remplacer   |   ✗ Ignorer = supprimer",
+        tk.Label(win,text="  ✓ Garder = conserver tel quel   |   ✏ Corriger = remplacer par un autre texte   |   ✗ Supprimer = retirer du PDF",
                  font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(anchor='w',padx=12,pady=(0,8))
+
         frame=tk.Frame(win,bg=C_BG); frame.pack(fill='both',expand=True,padx=12)
-        canvas=tk.Canvas(frame,bg=C_BG,highlightthickness=0,height=min(320,len(unknowns)*46+10))
+        canvas=tk.Canvas(frame,bg=C_BG,highlightthickness=0)
         sb=tk.Scrollbar(frame,orient='vertical',command=canvas.yview,bg=C_PANEL)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side='right',fill='y'); canvas.pack(side='left',fill='both',expand=True)
         inner=tk.Frame(canvas,bg=C_BG); canvas.create_window((0,0),window=inner,anchor='nw')
+
         decisions={}
         for word in sorted(unknowns):
-            rf=tk.Frame(inner,bg=C_CARD,pady=6); rf.pack(fill='x',pady=2,padx=4)
-            tk.Label(rf,text=f"  «{word}»",font=('Courier',9,'bold'),bg=C_CARD,fg=C_TEXT,width=22,anchor='w').pack(side='left')
-            action=tk.StringVar(value='ok'); correction=tk.StringVar(value=word)
-            for val,lbl in [('ok','✓ Garder'),('correction','✏ Corriger :'),('blacklist','✗ Ignorer')]:
-                tk.Radiobutton(rf,text=lbl,variable=action,value=val,bg=C_CARD,fg=C_TEXT,
-                               selectcolor=C_CARD,activebackground=C_CARD,font=('Helvetica',8)).pack(side='left',padx=4)
-            tk.Entry(rf,textvariable=correction,width=14,bg=C_ENTRY_BG,fg=C_TEXT,
-                     insertbackground=C_TEXT,relief='flat',font=('Helvetica',9)).pack(side='left',padx=4)
+            rf=tk.Frame(inner,bg=C_CARD,pady=8); rf.pack(fill='x',pady=2,padx=4)
+
+            # Mot
+            tk.Label(rf,text=f"  «{word}»",font=('Courier',9,'bold'),
+                     bg=C_CARD,fg=C_TEXT,width=20,anchor='w').pack(side='left')
+
+            action=tk.StringVar(value='ok')
+            correction=tk.StringVar(value='')
+
+            # Champ correction (caché par défaut)
+            corr_frame=tk.Frame(rf,bg=C_CARD)
+            corr_entry=tk.Entry(corr_frame,textvariable=correction,width=18,
+                bg=C_ENTRY_BG,fg=C_TEXT,insertbackground=C_TEXT,
+                relief='flat',font=('Helvetica',9))
+            corr_entry.pack(side='left',padx=4)
+            tk.Label(corr_frame,text="(saisir le remplacement)",
+                     bg=C_CARD,fg=C_TEXT2,font=('Helvetica',7)).pack(side='left')
+
+            def on_action_change(var=action, cf=corr_frame):
+                if var.get()=='correction':
+                    cf.pack(side='left',padx=(0,4))
+                else:
+                    cf.pack_forget()
+
+            for val,lbl in [('ok','✓ Garder'),('correction','✏ Corriger'),('blacklist','✗ Supprimer')]:
+                tk.Radiobutton(rf,text=lbl,variable=action,value=val,
+                               bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
+                               activebackground=C_CARD,font=('Helvetica',8),
+                               command=lambda v=action,cf=corr_frame: on_action_change(v,cf)
+                               ).pack(side='left',padx=6)
+
             decisions[word]=(action,correction)
-        inner.update_idletasks(); canvas.config(scrollregion=canvas.bbox('all'))
+
+        inner.update_idletasks()
+        canvas.config(scrollregion=canvas.bbox('all'))
+        inner.bind('<Configure>', lambda e: canvas.config(scrollregion=canvas.bbox('all')))
+
         def confirm():
             for word,(av,cv) in decisions.items():
                 act=av.get()
-                if act=='correction': self.cfg.setdefault('corrections',{})[word]=cv.get()
+                if act=='correction':
+                    val=cv.get().strip()
+                    if val:
+                        self.cfg.setdefault('corrections',{})[word]=val
+                    else:
+                        # Si champ vide → garder
+                        ok=self.cfg.setdefault('known_ok',[])
+                        if word not in ok: ok.append(word)
                 elif act=='blacklist':
                     bl=self.cfg.setdefault('blacklist',[])
                     if word not in bl: bl.append(word)
@@ -1003,8 +1053,10 @@ class App(tk.Tk):
             self._log(f"✓ {len(decisions)} mot(s) traité(s)")
             win.destroy()
             self._do_generate(pdf,out,structure)
-        tk.Button(win,text="✓ Confirmer et générer",command=confirm,bg=C_SUCCESS,fg='white',
-                  font=('Helvetica',10,'bold'),padx=20,pady=8,relief='flat',cursor='hand2').pack(pady=12)
+
+        tk.Button(win,text="✓ Confirmer et générer",command=confirm,
+                  bg=C_SUCCESS,fg='white',font=('Helvetica',10,'bold'),
+                  padx=20,pady=8,relief='flat',cursor='hand2').pack(pady=12)
 
     def _do_generate(self, pdf, out, structure):
         def worker():
