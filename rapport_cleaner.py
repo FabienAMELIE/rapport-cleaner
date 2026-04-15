@@ -129,7 +129,7 @@ def fix_word_breaks(text):
 def strip_choc(text):
     if not text: return text
     t = text.strip()
-    if not re.search(r'\bchoc\b', t, re.IGNORECASE): return t
+    if not re.search(r'\bchoc(?:ué?e?)?\b', t, re.IGNORECASE): return t
     has_hs = bool(re.search(r'\bHS\b', t, re.IGNORECASE))
     choc_re = re.compile(
         r'(?:léger\s+|leger\s+)?choc\s+'
@@ -141,6 +141,8 @@ def strip_choc(text):
         r'(?:\+\s*(?:pb|pi|ph|panneau\s+(?:bas|intermédiaire|intermediaire|haut))\s*)*'
         r'(?:\+?\s*hublot\s+\w+(?:\s+\w+)?\s+[\d×x]+(?:x\d+)?\s*)?', re.IGNORECASE)
     s = choc_re.sub('', t)
+    # Supprimer aussi "choqué(e)" standalone (ex: "cuve groupe hydraulique choquée")
+    s = re.sub(r'\bchoquée?\b', '', s, flags=re.IGNORECASE)
     for pat in [r'\b\d{3,4}x\d{3,4}(?:x\d+)?\b', r'\bx\d+\b(?!\s*cm)',
                 r'\b(?:nordsud|nord|sud|ral\s*\d*)\b',
                 r'\b(?:intérieur|extérieur|interieur|exterieur)\s+(?:\w+\s+)?\d{3,4}\b',
@@ -527,9 +529,11 @@ def _build_summary(rows_data, title):
                         m2=re.search(r'tendeurs?\s+([a-zA-Z])',seg); typ=m2.group(1).upper() if m2 else '?'
                     addt({'E':'Tendeur E (extensible)','L':'Tendeur L (long)','C':'Tendeur C (court)'}.get(typ,f'Tendeur {typ}'),n,q)
             else:
+                matched = False
                 hp=bool(re.search(r'\bpanneau\b|\binterm[eé]diaire\b|\bpi\b|\bpb\b|\bph\b',fl))
                 hj=bool(re.search(r'\bjoint\b',fl))
                 if hp or hj:
+                    matched = True
                     for seg in re.split(r'[,+]|\bet\b',fl):
                         seg=seg.strip()
                         if not seg: continue
@@ -538,28 +542,43 @@ def _build_summary(rows_data, title):
                         if re.search(r'\bpanneau\s+bas\b|\bpb\b',seg): add('Panneau bas',n,q)
                         if re.search(r'\bpanneau\s+haut\b|\bph\b',seg): add('Panneau haut',n,q)
                         if re.search(r'\bpanneau\s+(?:inter\w*|interm[eé]diaire)\b|\bpi\b|\binterm[eé]diaire\b|\binter\s*(?:hublot|hs|et|\b)',seg): add('Panneau intermédiaire',n,q)
-                elif 'suspente' in fl: add('Suspente à refaire',n)
-                elif 'flexible' in fl: add('Flexible HS',n,eq(fl))
-                elif 'verrou' in fl: add('Verrou HS',n)
-                elif 'roulette' in fl: add('Roulette manquante',n,eq(fl))
-                elif 'câble' in fl or 'cable' in fl: add('Câble acier',n,eq(fl))
-                elif 'butée' in fl or 'butee' in fl: add('Butée HS',n,eq(fl))
-                elif 'bavette' in fl: add('Bavette HS',n)
-                elif 'hublot' in fl: add('Hublot HS',n)
-                elif 'parachute' in fl: add('Parachute HS',n)
-                elif 'moteur' in fl: add('Moteur HS',n)
-                elif 'relais' in fl or 'carte' in fl or 'électronique' in fl: add('Défaut électronique',n)
-                elif 'spot' in fl or 'luminaire' in fl or 'led' in fl: add('Éclairage HS',n)
-                elif 'poignée' in fl or 'poignet' in fl: add('Poignée HS',n)
-                elif 'chasse' in fl: add('Chasse-pied HS',n)
-                elif 'béquille' in fl or 'bequille' in fl: add('Béquille sécurité absente',n)
-                elif 'charnière' in fl: add('Charnière HS',n)
-                elif 'soudure' in fl: add('Soudure à refaire',n)
-                elif 'traverse' in fl: add('Traverse déformée',n)
-                elif 'devis' in fl: add('Devis en cours',n)
-                elif 'cellule' in fl or 'asservissement' in fl: add('Absence cellule asservissement',n)
-                elif 'tendeur' in fl: addt('Tendeur L (long)',n,eq(fl))
-                else: add('Autre',n)
+                not_vetuste = not bool(re.search(r'\bvétuste\b|\bvetuste\b', fl))
+                if 'suspente' in fl: add('Suspente à refaire',n); matched=True
+                if 'flexible' in fl and not_vetuste:
+                    matched=True
+                    has_bavette   = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', fl))
+                    has_principal = 'principal' in fl
+                    if has_bavette and has_principal:
+                        add('Flexible vérin bavette HS', n); add('Flexible vérin principal HS', n)
+                    elif has_bavette:
+                        add('Flexible vérin bavette HS', n)
+                    elif has_principal:
+                        add('Flexible vérin principal HS', n)
+                    else:
+                        add('Flexible HS', n, eq(fl))
+                if 'verrou' in fl and not_vetuste: add('Verrou HS',n); matched=True
+                if 'roulette' in fl: add('Roulette manquante',n,eq(fl)); matched=True
+                if ('câble' in fl or 'cable' in fl) and not_vetuste:
+                    matched=True
+                    if 'spirale' in fl: add('Câble spirale HS', n)
+                    else: add('Câble acier HS', n, eq(fl))
+                if ('butée' in fl or 'butee' in fl) and not_vetuste: add('Butée HS',n,eq(fl)); matched=True
+                if 'bavette' in fl and not_vetuste: add('Bavette HS',n); matched=True
+                if 'hublot' in fl and not_vetuste: add('Hublot HS',n); matched=True
+                if 'parachute' in fl and not_vetuste: add('Parachute HS',n); matched=True
+                if 'moteur' in fl and not_vetuste: add('Moteur HS',n); matched=True
+                if ('relais' in fl or 'carte' in fl or 'électronique' in fl) and not_vetuste: add('Défaut électronique',n); matched=True
+                if ('spot' in fl or 'luminaire' in fl or 'led' in fl) and not_vetuste: add('Éclairage HS',n); matched=True
+                if ('poignée' in fl or 'poignet' in fl) and not_vetuste: add('Poignée HS',n); matched=True
+                if 'chasse' in fl and not_vetuste: add('Chasse-pied HS',n); matched=True
+                if ('béquille' in fl or 'bequille' in fl): add('Béquille sécurité absente',n); matched=True
+                if 'charnière' in fl and not_vetuste: add('Charnière HS',n); matched=True
+                if 'soudure' in fl: add('Soudure à refaire',n); matched=True
+                if 'traverse' in fl: add('Traverse déformée',n); matched=True
+                if 'devis' in fl: add('Devis en cours',n); matched=True
+                if 'cellule' in fl or 'asservissement' in fl: add('Absence cellule asservissement',n); matched=True
+                if is_sas and 'tendeur' in fl: addt('Tendeur L (long)',n,eq(fl)); matched=True
+                if not matched: add('Autre',n)
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
         return f"<b>{lbl}</b> ({tot}) : {', '.join(parts)}"
