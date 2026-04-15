@@ -191,9 +191,35 @@ def apply_corrections(text, corrections):
         text = re.sub(r'\b' + re.escape(wrong) + r'\b', right, text, flags=re.IGNORECASE)
     return text
 
+# Paires de mots du domaine qui peuvent être fusionnés sans espace
+_FUSED_PATTERNS = [
+    # tendeur(s) + qualificatif
+    (r'\btendeurs?(longs?|courts?|extensibles?)\b', lambda m: 'tendeurs ' + m.group(1)),
+    # panneau + position
+    (r'\bpanneau(bas|haut|intermédiaire|intermediaire)\b', lambda m: 'panneau ' + m.group(1)),
+    # flexible + type
+    (r'\bflexible(verin|vérin)\b', lambda m: 'flexible ' + m.group(1)),
+    # verin + type
+    (r'\b(verin|vérin)(bavette|principal|lèvre|levre)\b', lambda m: m.group(1) + ' ' + m.group(2)),
+    # absence + de
+    (r'\babsencede\b', 'absence de'),
+    # cellule + d
+    (r'\bcellulede\b', "cellule d'"),
+]
+
+def fix_fused_words(text):
+    if not text: return text
+    for pat, repl in _FUSED_PATTERNS:
+        if callable(repl):
+            text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+        else:
+            text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+    return text
+
 def clean_cell(text, corrections=None, blacklist=None):
     if not text: return ''
     t = fix_word_breaks(text)
+    t = fix_fused_words(t)
     if corrections: t = apply_corrections(t, corrections)
     t = strip_choc(t)
     t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+effectué\b', '', t, flags=re.IGNORECASE)
@@ -484,10 +510,13 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
 
     # Summary
     col_order_cm = {r: i for i, r in enumerate(col_order)}
-    summary_rows=[]
+    summary_rows=[]; tech_notes=[]
     for row in rows_data:
         n=row[1]
-        if n == '__NOTE__': continue
+        if n == '__NOTE__':
+            note_text = row[2] if len(row) > 2 else ''
+            if note_text: tech_notes.append(note_text)
+            continue
         fields=list(row[2:])
         if style=='nom_commentaire':
             summary_rows.append((0,n,fields[0] if len(fields)>0 else '',
@@ -503,7 +532,7 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     raw_title = fname.replace('_',' ').replace('-',' ')
     société = re.sub(r'\s*[\-_]?\s*(?:clean\s*(?:v\d+)?|v\d+)\s*$', '', raw_title, flags=re.IGNORECASE).strip()
     société = re.sub(r'\s{2,}', ' ', société).strip()
-    story = _build_summary(summary_rows, société, active_cols)
+    story = _build_summary(summary_rows, société, active_cols, tech_notes)
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
@@ -511,25 +540,21 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     doc.build(story)
 
-def _build_summary(rows_data, title, active_cols=None):
+def _build_summary(rows_data, title, active_cols=None, tech_notes=None):
     if active_cols is None: active_cols = ['porte','niv','sas']
+    if tech_notes is None: tech_notes = []
     ts=ParagraphStyle('ts',fontSize=13,fontName='Helvetica-Bold',spaceAfter=8,alignment=1)
     ns=ParagraphStyle('n',fontSize=8.5,fontName='Helvetica',textColor=colors.HexColor('#333333'),spaceAfter=4,leading=13)
     note_style=ParagraphStyle('note',fontSize=8.5,fontName='Helvetica-Oblique',
         textColor=colors.HexColor('#555555'),spaceAfter=4,leading=13)
     def eq(seg):
         m=re.match(r'^\s*(\d+)\s*(?:x\s*)?',seg.strip()); return int(m.group(1)) if m else 1
-    cats={}; tcats={}; vns=[]; notes=[]
+    cats={}; tcats={}; vns=[]
     def add(c,n,q=1): cats.setdefault(c,{}); cats[c][n]=cats[c].get(n,0)+q
     def addt(l,n,q=1): tcats.setdefault(l,{}); tcats[l][n]=tcats[l].get(n,0)+q
     sas_ci = active_cols.index('sas') if 'sas' in active_cols else -1
     for row in rows_data:
         n=row[1]
-        # Notes globales technicien — afficher dans récap, ne pas analyser
-        if n == '__NOTE__':
-            note_text = row[2] if len(row) > 2 else ''
-            if note_text: notes.append(note_text)
-            continue
         for ci,f in enumerate(row[2:]):
             if not f: continue
             fl=f.lower(); is_sas=(ci==sas_ci)
@@ -649,7 +674,7 @@ def _build_summary(rows_data, title, active_cols=None):
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     for lbl in sorted(tcats.keys()): story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
     for c,d in cats.items(): story.append(Paragraph(fmt(c,d),ns))
-    for note in notes:
+    for note in tech_notes:
         story.append(Paragraph(f"<b>Note technicien :</b> {note}", note_style))
     story.append(Spacer(1,6))
     story.append(Table([['']],colWidths=[257*mm],style=TableStyle([('LINEABOVE',(0,0),(-1,-1),0.5,colors.HexColor('#cccccc'))])))
