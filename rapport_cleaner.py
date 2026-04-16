@@ -322,6 +322,12 @@ def make_img(name, img_dir):
     except: return ''
 
 def extract_and_map_images(pdf_path, img_dir, n_col=1):
+    # Nettoyer les anciennes images pour éviter le cache périmé
+    if os.path.exists(img_dir):
+        for f in os.listdir(img_dir):
+            if f.endswith(('.jpg', '.png', '.jpeg')):
+                try: os.remove(os.path.join(img_dir, f))
+                except: pass
     os.makedirs(img_dir, exist_ok=True)
     img_map = {}
     with pdfplumber.open(pdf_path) as pdf:
