@@ -799,10 +799,10 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
 
     # Logo en haut à droite
     story = []
-    logo_path = resource_path('1631305813263.jpg')
+    logo_path = resource_path('LS_LOGO_HOR_RGB_TRANSPARANT.png')
     if os.path.exists(logo_path):
         try:
-            logo_h = 18*mm
+            logo_h = 14*mm
             with PILImage.open(logo_path) as im:
                 lw, lh = im.size
             logo_w = logo_h * lw / lh
@@ -825,7 +825,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 ('BOTTOMPADDING',(0,0),(-1,-1), 4),
             ]))
             story.append(header_table)
-        except:
+        except Exception as e:
             story.append(Paragraph(titre_final, ts))
     else:
         story.append(Paragraph(titre_final, ts))
@@ -1046,7 +1046,7 @@ class App(tk.Tk):
 
         # Icône barre des tâches
         try:
-            _ico_img = ImageTk.PhotoImage(file=resource_path('1631305813263.jpg'))
+            _ico_img = ImageTk.PhotoImage(file=resource_path('LS_LOGO_VERT_RGB_TRANSPARANT.png'))
             self.iconphoto(True, _ico_img)
             self._ico_ref = _ico_img
         except Exception as e:
@@ -1065,28 +1065,31 @@ class App(tk.Tk):
         # Barre accent en haut
         tk.Frame(self,bg=C_ACCENT,height=4).pack(fill='x')
 
-        # Titre + logo + bouton paramètres
+        # Titre + logo centré + bouton paramètres
         title_f=tk.Frame(self,bg=C_BG); title_f.pack(fill='x',padx=20,pady=(14,8))
+        # Grid à 3 colonnes : espacement gauche (poids 1) | logo centré | bouton paramètres (poids 1)
+        title_f.columnconfigure(0, weight=1, uniform='titlecol')
+        title_f.columnconfigure(1, weight=0)
+        title_f.columnconfigure(2, weight=1, uniform='titlecol')
 
-        # Logo Loading Systems (page d'accueil)
+        # Logo Loading Systems (horizontal) centré
         try:
-            _logo_pil = PILImage.open(resource_path('logoloadingsystemspng_5c2f7debbf555.png'))
-            _lh = 38
+            _logo_pil = PILImage.open(resource_path('LS_LOGO_HOR_RGB_TRANSPARANT.png'))
+            _lh = 56  # plus grand qu'avant (était 38)
             _lw = int(_logo_pil.width * _lh / _logo_pil.height)
             _logo_pil = _logo_pil.resize((_lw, _lh), PILImage.LANCZOS)
             _logo_tk = ImageTk.PhotoImage(_logo_pil)
             lbl_logo = tk.Label(title_f, image=_logo_tk, bg=C_BG)
             lbl_logo.image = _logo_tk
-            lbl_logo.pack(side='left', padx=(0, 14))
+            lbl_logo.grid(row=0, column=1, sticky='')
         except Exception as e:
             print(f"Logo accueil : {e}")
-            tk.Label(title_f,text="Rapport Cleaner",font=('Helvetica',18,'bold'),bg=C_BG,fg=C_TEXT).pack(side='left')
-            tk.Label(title_f,text="  Loading Systems",font=('Helvetica',11),bg=C_BG,fg=C_TEXT2).pack(side='left',pady=(4,0))
+            tk.Label(title_f,text="Rapport Cleaner",font=('Helvetica',18,'bold'),bg=C_BG,fg=C_TEXT).grid(row=0, column=1)
 
         tk.Button(title_f,text="⚙  Paramètres",command=self._open_settings,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=5,
                   font=('Helvetica',9),cursor='hand2',
-                  activebackground=C_CARD,activeforeground=C_TEXT).pack(side='right')
+                  activebackground=C_CARD,activeforeground=C_TEXT).grid(row=0, column=2, sticky='e')
 
         tk.Frame(self,bg=C_BORDER,height=1).pack(fill='x',padx=20)
 
