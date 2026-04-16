@@ -232,32 +232,132 @@ def clean_cell(text, corrections=None, blacklist=None):
     return t
 
 # ── Détection structure PDF ───────────────────────────────────────────────────
+def _looks_like_numero_header(h):
+    """Retourne True si le header ressemble à une colonne 'N°' ou 'Numéro'."""
+    if not h: return False
+    h = h.strip().lower()
+    return bool(re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$|^n\s*°?$', h)) or \
+           bool(re.search(r'^\s*numéros?\b|^\s*numero\b|^\s*n°\s', h))
+
+def _looks_like_photo_header(h):
+    """Retourne True si le header est une colonne Photo/Image."""
+    if not h: return False
+    h = h.strip().lower()
+    return bool(re.search(r'^photos?\+?$|^images?$', h))
+
+def _column_values(tables, col_idx):
+    """Retourne la liste des valeurs (non-header) d'une colonne, nettoyées."""
+    vals = []
+    for ri, row in enumerate(tables[0]):
+        if ri == 0: continue  # skip header
+        if col_idx < len(row) and row[col_idx]:
+            v = fix_word_breaks(row[col_idx]).strip()
+            vals.append(v)
+        else:
+            vals.append('')
+    return vals
+
+def _column_looks_numeric(vals):
+    """Retourne True si la colonne contient majoritairement des numéros/codes (pas du texte long)."""
+    if not vals: return False
+    non_empty = [v for v in vals if v.strip()]
+    if not non_empty: return False
+    numeric_count = 0
+    for v in non_empty:
+        # Une valeur "numérique" : chiffres purs, ou chiffres+lettres courts (ex: "201", "A12", "50B", "Rampe")
+        # Une valeur NON numérique : texte long (> 15 chars) ou phrases avec espaces multiples
+        if len(v) <= 15 and v.count(' ') <= 1:
+            numeric_count += 1
+    return numeric_count / len(non_empty) >= 0.7
+
+def _column_follows_row_index(vals):
+    """Retourne True si les valeurs suivent exactement l'index de ligne (1, 2, 3, 4...)."""
+    if not vals: return False
+    for i, v in enumerate(vals, start=1):
+        if v.strip() and v.strip() != str(i):
+            return False
+    return True
+
 def detect_structure(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[0]
         tables = page.extract_tables()
         if not tables or not tables[0]: return None
-        header = [fix_word_breaks(c).strip().lower() if c else '' for c in tables[0][0]]
+        header_raw = tables[0][0]
+        header = [fix_word_breaks(c).strip().lower() if c else '' for c in header_raw]
+    # Style nom_commentaire : inchangé
     if any('nom' in h for h in header) and any('commentaire' in h for h in header):
         return {'style': 'nom_commentaire', 'headers': header}
-    data_cols = {}; n_col = None; n_photos = 0
-    for i, h in enumerate(header):
-        if re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$', h): n_col = i
-        elif re.search(r'\bn\b|numéro', h) and n_col is None: n_col = i
-        elif re.search(r'^photos?\+?$|^images?$', h): n_photos += 1
-        elif re.search(r'porte.*rapide', h): data_cols['rapide'] = i
-        elif re.search(r'porte', h): data_cols['porte'] = i
-        elif re.search(r'niveleur|quai', h): data_cols['niv'] = i
-        elif re.search(r'sas', h): data_cols['sas'] = i
-        elif re.search(r'butoir|butoire', h): data_cols['but'] = i
-        elif re.search(r'rideau', h): data_cols['rideau'] = i
-        elif re.search(r'cale', h): data_cols['cale'] = i
-        elif re.search(r'chandelle', h): data_cols['chandelle'] = i
+
+    # Identifier les colonnes photo (pour les exclure du flux texte)
+    photo_cols = [i for i, h in enumerate(header) if _looks_like_photo_header(h)]
+
+    # Détecter la colonne numéro d'équipement avec la nouvelle logique
+    # Règle :
+    #  - Si la 1ère col a header "N°/Numéro" ET la 2ème ne ressemble pas à une col numéro → on prend la 1ère
+    #  - Si les deux ressemblent à des numéros (header ou contenu) → on prend la 2ème SAUF si
+    #    la 2ème suit exactement l'index de ligne et la 1ère aussi : dans ce cas on prend la 1ère
+    #  - On détecte un "saut" dans la 2ème col (valeurs non-numériques ou qui ne suivent pas l'index) → 2ème
+    n_col = None
+    if len(header) >= 1:
+        col0_header_numeric = _looks_like_numero_header(header[0])
+        col1_header_numeric = len(header) >= 2 and _looks_like_numero_header(header[1])
+        col0_vals = _column_values(tables, 0)
+        col1_vals = _column_values(tables, 1) if len(header) >= 2 else []
+        col0_numeric = _column_looks_numeric(col0_vals)
+        col1_numeric = _column_looks_numeric(col1_vals)
+        col0_follows = _column_follows_row_index(col0_vals)
+        col1_follows = _column_follows_row_index(col1_vals)
+
+        if col0_header_numeric or col0_numeric:
+            # La 1ère colonne est une candidate
+            if col1_header_numeric or col1_numeric:
+                # Les deux candidates → on prend la 2ème si elle ne suit pas l'index,
+                # ou si son header est plus explicite (N°, Numéro)
+                if not col1_follows or col1_header_numeric:
+                    n_col = 1
+                else:
+                    n_col = 0
+            else:
+                n_col = 0
+        elif col1_header_numeric or col1_numeric:
+            # Seule la 2ème est candidate
+            n_col = 1
+
     if n_col is None: n_col = 0
-    # Clamp entre 2 et 6
-    n_photos = max(2, min(6, n_photos)) if n_photos > 0 else 3
+
+    # Colonnes de données = toutes les colonnes qui ne sont ni photo ni n_col
+    # ET qui ne sont pas d'autres colonnes "numéro" redondantes (index de ligne)
+    data_col_indices = []
+    for i in range(len(header)):
+        if i == n_col: continue
+        if i in photo_cols: continue
+        # Exclure les colonnes qui sont clairement des colonnes numéro redondantes
+        col_vals = _column_values(tables, i)
+        if _looks_like_numero_header(header[i]) or _column_follows_row_index(col_vals):
+            # Colonne qui ressemble à une numérotation (header "N°" ou valeurs 1,2,3...)
+            # → on l'exclut sauf si elle contient du texte long (dans ce cas c'est pas juste un n°)
+            has_text = any(v and (len(v) > 15 or ' ' in v.strip()) for v in col_vals)
+            if not has_text:
+                continue
+        data_col_indices.append(i)
+    # Construire les labels à partir des headers (tels quels, juste formatés joliment)
+    data_col_labels = {}
+    for i in data_col_indices:
+        label = header_raw[i] if i < len(header_raw) and header_raw[i] else ''
+        label = fix_word_breaks(label).strip()
+        # Capitaliser proprement la première lettre
+        if label:
+            label = label[0].upper() + label[1:]
+        data_col_labels[i] = label or f"Colonne {i+1}"
+
+    n_photos = max(2, min(6, len(photo_cols))) if photo_cols else 3
+
     return {'style': 'standard', 'headers': header, 'n_col': n_col,
-            'data_cols': data_cols, 'n_photos': n_photos}
+            'data_col_indices': data_col_indices,
+            'data_col_labels': data_col_labels,
+            'photo_cols': photo_cols,
+            'n_photos': n_photos}
 
 def detect_unknown_words(pdf_path, corrections, blacklist):
     KNOWN = {
@@ -402,38 +502,38 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
     log(f"✓ PDF généré : {output_path}")
 
 def _read_standard(pdf_path, structure, corrections, blacklist):
-    dc = structure.get('data_cols', {}); n_col = structure.get('n_col', 0)
-    col_order = ['porte','rapide','niv','sas','but','rideau','cale','chandelle']
+    n_col = structure.get('n_col', 0)
+    data_col_indices = structure.get('data_col_indices', [])
     rows_data = []; seen = set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             if not tables: continue
-            for row in tables[0]:
+            for ri, row in enumerate(tables[0]):
                 if not row: continue
+                if ri == 0: continue  # première ligne = header, on skip
                 n_raw = row[n_col] if n_col < len(row) else ''
                 # Ligne sans numéro : note globale technicien
                 if not n_raw or not n_raw.strip():
-                    # Chercher du contenu dans les colonnes de données
                     note_parts = []
-                    for role in col_order:
-                        idx = dc.get(role)
-                        raw = row[idx] if idx is not None and idx < len(row) and row[idx] else ''
+                    for idx in data_col_indices:
+                        raw = row[idx] if idx < len(row) and row[idx] else ''
                         if raw.strip():
                             note_parts.append(fix_word_breaks(raw).strip())
                     if note_parts:
                         note_text = ' / '.join(note_parts)
-                        rows_data.append((len(rows_data), '__NOTE__') + (note_text,) + tuple(['']*7))
+                        padding = tuple([''] * max(0, len(data_col_indices) - 1))
+                        rows_data.append((len(rows_data), '__NOTE__', note_text) + padding)
                     continue
                 n = fix_word_breaks(n_raw).strip()
-                if not n or n in ('N','N°','#','Numéros','∑') or n in seen: continue
+                if not n or n in ('N','N°','#','Numéros','Numéro','Numero','∑') or n in seen: continue
+                # Détecter une ligne qui est en réalité un header répété (valeurs = mots de header)
                 if re.search(r'[a-zA-Z]{3,}', n) and not re.search(r'\d', n):
-                    if n.lower() in ('n','n°','numéros','image','photo','porte','niveleur','sas'): continue
+                    if n.lower() in ('n','n°','numéros','numéro','numero','image','photo','porte','niveleur','sas'): continue
                 seen.add(n)
                 fields = []
-                for role in col_order:
-                    idx = dc.get(role)
-                    raw = row[idx] if idx is not None and idx<len(row) and row[idx] else ''
+                for idx in data_col_indices:
+                    raw = row[idx] if idx < len(row) and row[idx] else ''
                     fields.append(clean_cell(raw, corrections, blacklist))
                 rows_data.append((len(rows_data), n) + tuple(fields))
     return rows_data
@@ -472,18 +572,26 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
 
 def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     style = structure.get('style','standard')
-    dc = structure.get('data_cols', {})
-    col_order = ['porte','rapide','niv','sas','but','rideau','cale','chandelle']
-    active_cols = [r for r in col_order if r in dc] if style=='standard' else ['porte','niv','sas']
-    COL_LABELS = {'porte':'Porte sectionnelle','rapide':'Porte rapide','niv':'Niveleur / Quai','sas':'SAS',
-                  'but':'Butoire','rideau':'Rideau','cale':'Cale','chandelle':'Chandelle'}
-    N_PHOTOS = structure.get('n_photos', 3) if style=='standard' else 3
-    N_IMG_W=23*mm; N_COL_W=14*mm
-    page_w = landscape(A4)[0]-20*mm
-    data_col_w = (page_w - N_PHOTOS*N_IMG_W - N_COL_W) / max(len(active_cols),1)
-    col_widths = [N_COL_W]+[data_col_w]*len(active_cols)+[N_IMG_W]*N_PHOTOS
-    headers = ['N°']+[COL_LABELS.get(r,r) for r in active_cols]+[f'Photo {i+1}' for i in range(N_PHOTOS)]
-    header_row = [make_cell(h,bold=True,size=8,color=colors.white) for h in headers]
+    
+    if style == 'nom_commentaire':
+        # Mode nom_commentaire : colonnes fixes Porte/Niveleur/SAS (logique existante)
+        active_col_labels = ['Porte sectionnelle', 'Niveleur / Quai', 'SAS']
+        N_PHOTOS = 3
+    else:
+        # Mode standard : on prend les labels tels quels depuis le PDF
+        data_col_indices = structure.get('data_col_indices', [])
+        data_col_labels = structure.get('data_col_labels', {})
+        active_col_labels = [data_col_labels.get(i, f"Col {i+1}") for i in data_col_indices]
+        N_PHOTOS = structure.get('n_photos', 3)
+    
+    n_data_cols = len(active_col_labels)
+    N_IMG_W = 23*mm
+    N_COL_W = 14*mm
+    page_w = landscape(A4)[0] - 20*mm
+    data_col_w = (page_w - N_PHOTOS*N_IMG_W - N_COL_W) / max(n_data_cols, 1)
+    col_widths = [N_COL_W] + [data_col_w]*n_data_cols + [N_IMG_W]*N_PHOTOS
+    headers = ['N°'] + active_col_labels + [f'Photo {i+1}' for i in range(N_PHOTOS)]
+    header_row = [make_cell(h, bold=True, size=8, color=colors.white) for h in headers]
     table_data = [header_row]
     style_cmds = [
         ('BACKGROUND',(0,0),(-1,0),HEADER_BG),('TEXTCOLOR',(0,0),(-1,0),colors.white),
@@ -494,14 +602,25 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
         ('ROWHEIGHT',(0,0),(-1,0),10*mm),
     ]
-    cm = {r: i for i, r in enumerate(col_order)}
     alt = 0
     for row in rows_data:
         n = row[1]
         if n == '__NOTE__': continue  # notes globales → récap uniquement
         fields = list(row[2:])
-        active_fields = [fields[cm[r]] if cm[r] < len(fields) else '' for r in active_cols]
+        # En mode nom_commentaire, le tuple est (porte, rapide_vide, niv, sas, ...)
+        # On doit extraire porte/niv/sas
+        if style == 'nom_commentaire':
+            active_fields = [
+                fields[0] if len(fields) > 0 else '',  # porte
+                fields[2] if len(fields) > 2 else '',  # niv
+                fields[3] if len(fields) > 3 else '',  # sas
+            ]
+        else:
+            # En mode standard, les fields sont déjà dans l'ordre des data_col_indices
+            active_fields = [fields[i] if i < len(fields) else '' for i in range(n_data_cols)]
+        
         if not any(f.strip() for f in active_fields): continue
+        
         if style=='nom_commentaire' and quais:
             qn=int(n); d=quais.get(qn,{})
             imgs = (img_map.get(d.get('porte',('',''))[0],[]) +
@@ -517,8 +636,7 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
         style_cmds.append(('ROWHEIGHT',(0,idx),(-1,idx),21*mm if imgs else 7*mm))
         alt+=1
 
-    # Summary
-    col_order_cm = {r: i for i, r in enumerate(col_order)}
+    # Summary : on passe tous les fields + les labels pour que le summary puisse chercher partout
     summary_rows=[]; tech_notes=[]
     for row in rows_data:
         n=row[1]
@@ -527,24 +645,19 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
             if note_text: tech_notes.append(note_text)
             continue
         fields=list(row[2:])
-        if style=='nom_commentaire':
-            # fields = [porte, rapide(vide), niv, sas, ...]
-            # active_cols pour nom_commentaire = ['porte','niv','sas']
+        if style == 'nom_commentaire':
             summary_rows.append((0, n,
                                  fields[0] if len(fields)>0 else '',  # porte
                                  fields[2] if len(fields)>2 else '',  # niv
-                                 fields[3] if len(fields)>3 else '', '', ''))  # sas
+                                 fields[3] if len(fields)>3 else ''))  # sas
         else:
-            # Passer toutes les colonnes actives (pas seulement porte/niv/sas)
-            row_fields = [fields[col_order_cm[r]] if col_order_cm[r] < len(fields) else '' for r in active_cols]
-            summary_rows.append((0, n) + tuple(row_fields))
+            summary_rows.append((0, n) + tuple(fields))
 
     fname = os.path.splitext(os.path.basename(output_path))[0]
-    # Nettoyer le nom : supprimer uniquement les suffixes qu'on rajoute (clean, v1, v2, v3...)
     raw_title = fname.replace('_',' ').replace('-',' ')
     société = re.sub(r'\s*[\-_]?\s*(?:clean\s*(?:v\d+)?|v\d+)\s*$', '', raw_title, flags=re.IGNORECASE).strip()
     société = re.sub(r'\s{2,}', ' ', société).strip()
-    story = _build_summary(summary_rows, société, active_cols, tech_notes)
+    story = _build_summary(summary_rows, société, active_col_labels, tech_notes, style)
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
@@ -578,8 +691,8 @@ def _condense_summary_label(text):
         return ' + '.join(parts)
     return text
 
-def _build_summary(rows_data, title, active_cols=None, tech_notes=None):
-    if active_cols is None: active_cols = ['porte','niv','sas']
+def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, style='standard'):
+    if active_col_labels is None: active_col_labels = ['Porte sectionnelle','Niveleur / Quai','SAS']
     if tech_notes is None: tech_notes = []
     ts=ParagraphStyle('ts',fontSize=13,fontName='Helvetica-Bold',spaceAfter=8,alignment=1)
     ns=ParagraphStyle('n',fontSize=8.5,fontName='Helvetica',textColor=colors.HexColor('#333333'),spaceAfter=4,leading=13)
@@ -590,12 +703,16 @@ def _build_summary(rows_data, title, active_cols=None, tech_notes=None):
     cats={}; tcats={}; vns=[]
     def add(c,n,q=1): cats.setdefault(c,{}); cats[c][n]=cats[c].get(n,0)+q
     def addt(l,n,q=1): tcats.setdefault(l,{}); tcats[l][n]=tcats[l].get(n,0)+q
-    sas_ci = active_cols.index('sas') if 'sas' in active_cols else -1
+    # Détection colonne SAS par son label (robuste aux noms variés : "SAS", "Sas d'étanchéité", etc.)
+    sas_indices = set()
+    for ci, label in enumerate(active_col_labels):
+        if label and re.search(r'\bsas\b', label, re.IGNORECASE):
+            sas_indices.add(ci)
     for row in rows_data:
         n=row[1]
         for ci,f in enumerate(row[2:]):
             if not f: continue
-            fl=f.lower(); is_sas=(ci==sas_ci)
+            fl=f.lower(); is_sas=(ci in sas_indices)
             if 'vidange' in fl or 'hydraulique' in fl:
                 if n not in vns: vns.append(n)
             elif is_sas and ('tendeur' in fl or 'crochet' in fl or
@@ -685,15 +802,18 @@ def _build_summary(rows_data, title, active_cols=None, tech_notes=None):
     logo_path = resource_path('1631305813263.jpg')
     if os.path.exists(logo_path):
         try:
-            logo_h = 14*mm
+            logo_h = 18*mm
             with PILImage.open(logo_path) as im:
                 lw, lh = im.size
             logo_w = logo_h * lw / lh
             logo = RLImage(logo_path, width=logo_w, height=logo_h)
-            # Tableau 1 ligne : titre centré + logo à droite
+            # Tableau 1 ligne : titre centré + logo à droite (largeur utile ≈ 277mm)
+            page_content_w = landscape(A4)[0] - 20*mm
+            logo_col_w = logo_w + 4*mm
+            title_col_w = page_content_w - logo_col_w
             header_table = Table(
                 [[Paragraph(titre_final, ts), logo]],
-                colWidths=[247*mm, logo_w + 4*mm]
+                colWidths=[title_col_w, logo_col_w]
             )
             header_table.setStyle(TableStyle([
                 ('ALIGN',    (0,0),(0,0), 'CENTER'),
