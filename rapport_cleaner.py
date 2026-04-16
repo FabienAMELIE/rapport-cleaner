@@ -223,7 +223,7 @@ def clean_cell(text, corrections=None, blacklist=None):
     if corrections: t = apply_corrections(t, corrections)
     t = strip_choc(t)
     t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+effectué\b', '', t, flags=re.IGNORECASE)
-    t = re.sub(r'^[\s/\-,;]+','',t); t = re.sub(r'[\s/\-,;]+$','',t)
+    t = re.sub(r'^[\s/\-,;.]+','',t); t = re.sub(r'[\s/\-,;.]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
     bl = blacklist or []
     if is_blacklisted_full(t, bl): return ''
@@ -245,6 +245,7 @@ def detect_structure(pdf_path):
         if re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$', h): n_col = i
         elif re.search(r'\bn\b|numéro', h) and n_col is None: n_col = i
         elif re.search(r'^photos?\+?$|^images?$', h): n_photos += 1
+        elif re.search(r'porte.*rapide', h): data_cols['rapide'] = i
         elif re.search(r'porte', h): data_cols['porte'] = i
         elif re.search(r'niveleur|quai', h): data_cols['niv'] = i
         elif re.search(r'sas', h): data_cols['sas'] = i
@@ -382,9 +383,8 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
         if log_fn: log_fn(msg)
     style = structure.get('style', 'standard')
     img_dir = os.path.join(tempfile.gettempdir(), 'rapport_cleaner_imgs')
-    img_n_col = structure.get('n_col', 1)
+    img_n_col = structure.get('n_col', 0)
     if style == 'nom_commentaire': img_n_col = 0
-    elif img_n_col == 0: img_n_col = 1
 
     log("Extraction des images...")
     img_map = extract_and_map_images(pdf_path, img_dir, n_col=img_n_col)
@@ -403,7 +403,7 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
 
 def _read_standard(pdf_path, structure, corrections, blacklist):
     dc = structure.get('data_cols', {}); n_col = structure.get('n_col', 0)
-    col_order = ['porte','niv','sas','but','rideau','cale','chandelle']
+    col_order = ['porte','rapide','niv','sas','but','rideau','cale','chandelle']
     rows_data = []; seen = set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -423,7 +423,7 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
                             note_parts.append(fix_word_breaks(raw).strip())
                     if note_parts:
                         note_text = ' / '.join(note_parts)
-                        rows_data.append((len(rows_data), '__NOTE__') + (note_text,) + tuple(['']*6))
+                        rows_data.append((len(rows_data), '__NOTE__') + (note_text,) + tuple(['']*7))
                     continue
                 n = fix_word_breaks(n_raw).strip()
                 if not n or n in ('N','N°','#','Numéros','∑') or n in seen: continue
@@ -470,9 +470,9 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
 def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     style = structure.get('style','standard')
     dc = structure.get('data_cols', {})
-    col_order = ['porte','niv','sas','but','rideau','cale','chandelle']
+    col_order = ['porte','rapide','niv','sas','but','rideau','cale','chandelle']
     active_cols = [r for r in col_order if r in dc] if style=='standard' else ['porte','niv','sas']
-    COL_LABELS = {'porte':'Porte sectionnelle','niv':'Niveleur / Quai','sas':'SAS',
+    COL_LABELS = {'porte':'Porte sectionnelle','rapide':'Porte rapide','niv':'Niveleur / Quai','sas':'SAS',
                   'but':'Butoire','rideau':'Rideau','cale':'Cale','chandelle':'Chandelle'}
     N_PHOTOS = structure.get('n_photos', 3) if style=='standard' else 3
     N_IMG_W=23*mm; N_COL_W=14*mm
@@ -545,6 +545,32 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     doc = SimpleDocTemplate(output_path, pagesize=landscape(A4),
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     doc.build(story)
+
+def _condense_summary_label(text):
+    """Condense les textes avec dimensions pour le résumé.
+    Ex: '3 raidisseurs diamètre 40mm longueur 4250mm 2 raidisseurs diamètre 30mm longueur 4250mm'
+    → '5 raidisseurs'
+    Ex: '3 sangles de longueur 7000mm chacune largeur 50mm'
+    → '3 sangles'
+    """
+    if not text: return text
+    # Détecter si le texte contient des dimensions (mm, cm, m, diamètre, longueur, largeur, épaisseur)
+    if not re.search(r'\b(?:diamètre|diametre|longueur|largeur|épaisseur|epaisseur|\d+\s*(?:mm|cm|m)\b)', text, re.IGNORECASE):
+        return text
+    # Extraire les groupes "N items" et additionner par type d'item
+    item_counts = {}
+    for m in re.finditer(r'(\d+)\s+([a-zA-ZÀ-ÿ]+)', text):
+        qty = int(m.group(1))
+        item = m.group(2).strip().lower()
+        # Ignorer les items qui sont des dimensions ou des prépositions
+        if item in ('mm','cm','m','de','du','des','la','le','les','diamètre','diametre',
+                     'longueur','largeur','épaisseur','epaisseur','x','chacune','chacun'):
+            continue
+        item_counts[item] = item_counts.get(item, 0) + qty
+    if item_counts:
+        parts = [f"{q} {name}" for name, q in item_counts.items()]
+        return ' + '.join(parts)
+    return text
 
 def _build_summary(rows_data, title, active_cols=None, tech_notes=None):
     if active_cols is None: active_cols = ['porte','niv','sas']
@@ -640,7 +666,7 @@ def _build_summary(rows_data, title, active_cols=None, tech_notes=None):
                     # Entrées dynamiques : découper sur séparateurs et compter chaque élément
                     segments = [s.strip() for s in re.split(r'\s*[+/,]\s*', f.strip()) if s.strip()]
                     for seg in segments:
-                        label = seg.strip().rstrip('.')
+                        label = _condense_summary_label(seg.strip().rstrip('.'))
                         if label: add(label, n)
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
