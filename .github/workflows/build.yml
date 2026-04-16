@@ -20,7 +20,7 @@ jobs:
 
       - name: Installer les dépendances
         run: |
-          pip install pyinstaller pdfplumber reportlab pillow
+          pip install pyinstaller pdfplumber reportlab pillow tkinterdnd2
 
       - name: Compiler le .exe
         run: |
@@ -29,6 +29,7 @@ jobs:
             --icon "LS_LOGO_ICON.ico" `
             --add-data "LS_LOGO_HOR_RGB_TRANSPARANT.png;." `
             --add-data "LS_LOGO_VERT_RGB_TRANSPARANT.png;." `
+            --collect-all tkinterdnd2 `
             --hidden-import pdfplumber `
             --hidden-import pdfminer `
             --hidden-import reportlab `
@@ -38,6 +39,7 @@ jobs:
             --hidden-import tkinter.scrolledtext `
             --hidden-import tkinter.filedialog `
             --hidden-import tkinter.messagebox `
+            --hidden-import tkinterdnd2 `
             rapport_cleaner.py
 
       - name: Publier le .exe
