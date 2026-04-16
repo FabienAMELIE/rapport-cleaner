@@ -26,8 +26,8 @@ jobs:
         run: |
           pyinstaller --onefile --windowed `
             --name "RapportCleaner" `
-            --add-data "1631305813263.jpg;." `
-            --add-data "logoloadingsystemspng_5c2f7debbf555.png;." `
+            --add-data "LS_LOGO_HOR_RGB_TRANSPARANT.png;." `
+            --add-data "LS_LOGO_VERT_RGB_TRANSPARANT.png;." `
             --hidden-import pdfplumber `
             --hidden-import pdfminer `
             --hidden-import reportlab `
