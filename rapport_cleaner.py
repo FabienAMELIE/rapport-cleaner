@@ -461,10 +461,13 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
     rows_data = []
     for qn in sorted(quais.keys()):
         d = quais[qn]
+        # Tuple aligné sur col_order = ['porte','rapide','niv','sas','but','rideau','cale','chandelle']
         rows_data.append((qn, str(qn),
-                          d.get('porte',('',''))[1],
-                          d.get('niv',  ('',''))[1],
-                          d.get('sas',  ('',''))[1], '', ''))
+                          d.get('porte',('',''))[1],  # porte
+                          '',                          # rapide (non utilisé en nom_commentaire)
+                          d.get('niv',  ('',''))[1],  # niv
+                          d.get('sas',  ('',''))[1],  # sas
+                          '', '', '', ''))             # but, rideau, cale, chandelle
     return rows_data, quais
 
 def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
@@ -525,9 +528,12 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
             continue
         fields=list(row[2:])
         if style=='nom_commentaire':
-            summary_rows.append((0,n,fields[0] if len(fields)>0 else '',
-                                   fields[1] if len(fields)>1 else '',
-                                   fields[2] if len(fields)>2 else '','',''))
+            # fields = [porte, rapide(vide), niv, sas, ...]
+            # active_cols pour nom_commentaire = ['porte','niv','sas']
+            summary_rows.append((0, n,
+                                 fields[0] if len(fields)>0 else '',  # porte
+                                 fields[2] if len(fields)>2 else '',  # niv
+                                 fields[3] if len(fields)>3 else '', '', ''))  # sas
         else:
             # Passer toutes les colonnes actives (pas seulement porte/niv/sas)
             row_fields = [fields[col_order_cm[r]] if col_order_cm[r] < len(fields) else '' for r in active_cols]
