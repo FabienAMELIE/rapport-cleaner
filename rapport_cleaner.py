@@ -6,6 +6,12 @@ Nettoie automatiquement les rapports d'intervention PDF de techniciens.
 import os, re, sys, json, threading, tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+# Drag & drop : tkinterdnd2 pour supporter le glisser-déposer de fichiers
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    DND_AVAILABLE = True
+except ImportError:
+    DND_AVAILABLE = False
 import pdfplumber
 from PIL import Image as PILImage, ImageTk
 from reportlab.lib.pagesizes import landscape, A4
@@ -1033,7 +1039,10 @@ class SettingsWindow(tk.Toplevel):
         self.destroy()
 
 # ── Application principale ────────────────────────────────────────────────────
-class App(tk.Tk):
+# Classe de base : TkinterDnD.Tk si drag & drop disponible, sinon tk.Tk
+_AppBase = TkinterDnD.Tk if DND_AVAILABLE else tk.Tk
+
+class App(_AppBase):
     def __init__(self):
         super().__init__()
         self.title("Rapport Cleaner — Loading Systems")
@@ -1093,16 +1102,25 @@ class App(tk.Tk):
 
         tk.Frame(self,bg=C_BORDER,height=1).pack(fill='x',padx=20)
 
-        # Fichier source
+        # Fichier source (avec drag & drop si disponible)
         self._section("Fichier source")
         sf=tk.Frame(self,bg=C_PANEL); sf.pack(fill='x',padx=20,pady=(0,12))
         si=tk.Frame(sf,bg=C_PANEL); si.pack(fill='x',padx=12,pady=10)
-        self.lbl_src=tk.Label(si,text="Aucun fichier sélectionné",bg=C_ENTRY_BG,fg=C_TEXT2,
+        drop_hint = "  Glisser-déposer un PDF ici ou cliquer sur Parcourir" if DND_AVAILABLE else "Aucun fichier sélectionné"
+        self.lbl_src=tk.Label(si,text=drop_hint,bg=C_ENTRY_BG,fg=C_TEXT2,
                               font=('Helvetica',9),anchor='w',padx=10,pady=8,width=55)
         self.lbl_src.pack(side='left',fill='x',expand=True)
         tk.Button(si,text="Parcourir...",command=self._pick_pdf,bg=C_ACCENT,fg='white',
                   relief='flat',padx=14,pady=8,font=('Helvetica',9,'bold'),cursor='hand2',
                   activebackground=C_ACCENT2,activeforeground='white').pack(side='left',padx=(8,0))
+
+        # Activer le drag & drop sur le champ source
+        if DND_AVAILABLE:
+            for widget in (self.lbl_src, si, sf):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind('<<Drop>>', self._on_drop)
+                widget.dnd_bind('<<DropEnter>>', lambda e: self.lbl_src.config(bg=C_CARD))
+                widget.dnd_bind('<<DropLeave>>', lambda e: self.lbl_src.config(bg=C_ENTRY_BG))
 
         # Fichier de sortie
         self._section("Fichier de sortie")
@@ -1153,14 +1171,46 @@ class App(tk.Tk):
         path=filedialog.askopenfilename(title="Choisir le rapport PDF",
             filetypes=[("Fichiers PDF","*.pdf"),("Tous","*.*")])
         if path:
-            self.pdf_path.set(path)
-            name=os.path.basename(path)
-            self.lbl_src.config(text=f"  {name}",fg=C_TEXT)
-            out=os.path.splitext(path)[0]+'_clean.pdf'
-            self.out_path.set(out)
-            self.lbl_out.config(text=f"  {os.path.basename(out)}",fg=C_TEXT)
-            self._check_ready()
-            self._log(f"📂 {name}")
+            self._set_pdf_path(path)
+
+    def _on_drop(self, event):
+        """Callback quand un fichier est déposé sur la zone source."""
+        # Restaurer le fond normal
+        if DND_AVAILABLE:
+            self.lbl_src.config(bg=C_ENTRY_BG)
+        # event.data contient les chemins séparés par espaces, entourés de { } si nom contient espace
+        raw = event.data.strip()
+        # Nettoyer le format tkdnd : "{chemin 1} {chemin 2}" ou "chemin1 chemin2"
+        paths = []
+        if raw.startswith('{'):
+            # Plusieurs fichiers avec espaces dans le nom
+            import re as _re
+            paths = _re.findall(r'\{([^}]*)\}', raw)
+            # Ajouter aussi les chemins hors accolades
+            remaining = _re.sub(r'\{[^}]*\}', '', raw).strip()
+            if remaining:
+                paths.extend(remaining.split())
+        else:
+            paths = raw.split()
+        # Ne traiter que le premier PDF trouvé
+        for p in paths:
+            p = p.strip('"').strip("'")
+            if p.lower().endswith('.pdf') and os.path.isfile(p):
+                self._set_pdf_path(p)
+                return
+        # Aucun PDF valide
+        self._log("⚠ Aucun fichier PDF valide dans le drop")
+
+    def _set_pdf_path(self, path):
+        """Applique un chemin PDF au champ source et prépare la sortie par défaut."""
+        self.pdf_path.set(path)
+        name = os.path.basename(path)
+        self.lbl_src.config(text=f"  {name}", fg=C_TEXT)
+        out = os.path.splitext(path)[0] + '_clean.pdf'
+        self.out_path.set(out)
+        self.lbl_out.config(text=f"  {os.path.basename(out)}", fg=C_TEXT)
+        self._check_ready()
+        self._log(f"📂 {name}")
 
     def _pick_out(self):
         path=filedialog.asksaveasfilename(title="Enregistrer le PDF nettoyé",
