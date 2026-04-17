@@ -242,14 +242,15 @@ def _looks_like_numero_header(h):
     """Retourne True si le header ressemble à une colonne 'N°' ou 'Numéro'."""
     if not h: return False
     h = h.strip().lower()
-    return bool(re.search(r'^#$|^n°?$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$|^n\s*°?$', h)) or \
+    return bool(re.search(r'^#$|^n°?$|^n$|^n\s*°?\s*de\s*série|^numéros?$|^numero$|^num$|^n\s*°?$', h)) or \
            bool(re.search(r'^\s*numéros?\b|^\s*numero\b|^\s*n°\s', h))
 
 def _looks_like_photo_header(h):
     """Retourne True si le header est une colonne Photo/Image."""
     if not h: return False
     h = h.strip().lower()
-    return bool(re.search(r'^photos?\+?$|^images?$', h))
+    # Matche : "Photo", "Photos", "Image", "Images", "Photo Porte", "Photo Quai", "Photo PS", "Photo +", etc.
+    return bool(re.search(r'^photos?\b|^images?\b', h))
 
 def _column_values(tables, col_idx):
     """Retourne la liste des valeurs (non-header) d'une colonne, nettoyées."""
@@ -264,17 +265,20 @@ def _column_values(tables, col_idx):
     return vals
 
 def _column_looks_numeric(vals):
-    """Retourne True si la colonne contient majoritairement des numéros/codes (pas du texte long)."""
+    """Retourne True si la colonne contient majoritairement des numéros/codes courts avec des chiffres."""
     if not vals: return False
     non_empty = [v for v in vals if v.strip()]
     if not non_empty: return False
     numeric_count = 0
     for v in non_empty:
-        # Une valeur "numérique" : chiffres purs, ou chiffres+lettres courts (ex: "201", "A12", "50B", "Rampe")
-        # Une valeur NON numérique : texte long (> 15 chars) ou phrases avec espaces multiples
-        if len(v) <= 15 and v.count(' ') <= 1:
+        v = v.strip()
+        # Une valeur "numérique" : doit contenir au moins un chiffre, ET être court (≤ 15 chars),
+        # ET pas trop de mots (≤ 2 espaces). Ex: "201", "A12", "50B", "1 devant quai"
+        # "Ras", "ressort droit et gauche déformé" ne passent PAS (pas de chiffre ou trop long)
+        has_digit = bool(re.search(r'\d', v))
+        if has_digit and len(v) <= 15 and v.count(' ') <= 2:
             numeric_count += 1
-    return numeric_count / len(non_empty) >= 0.7
+    return numeric_count / len(non_empty) >= 0.5
 
 def _column_follows_row_index(vals):
     """Retourne True si les valeurs suivent exactement l'index de ligne (1, 2, 3, 4...)."""
@@ -290,7 +294,9 @@ def detect_structure(pdf_path):
         tables = page.extract_tables()
         if not tables or not tables[0]: return None
         header_raw = tables[0][0]
-        header = [fix_word_breaks(c).strip().lower() if c else '' for c in header_raw]
+        # Pour les headers : simple remplacement des retours à la ligne par espaces (pas fix_word_breaks
+        # qui peut fusionner des mots courts comme "Photo\nQuai" → "photoquai")
+        header = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in header_raw]
     # Style nom_commentaire : inchangé
     if any('nom' in h for h in header) and any('commentaire' in h for h in header):
         return {'style': 'nom_commentaire', 'headers': header}
@@ -333,25 +339,25 @@ def detect_structure(pdf_path):
     if n_col is None: n_col = 0
 
     # Colonnes de données = toutes les colonnes qui ne sont ni photo ni n_col
-    # ET qui ne sont pas d'autres colonnes "numéro" redondantes (index de ligne)
+    # On exclut uniquement les colonnes qui ont un header de type "N°"/"Numéro" (redondantes)
+    # ou un header vide (colonne sans nom = probablement un index de ligne inutile)
+    # On ne filtre PAS sur le contenu de la page 1 (une colonne peut être vide page 1 mais remplie page 3)
     data_col_indices = []
     for i in range(len(header)):
         if i == n_col: continue
         if i in photo_cols: continue
-        # Exclure les colonnes qui sont clairement des colonnes numéro redondantes
-        col_vals = _column_values(tables, i)
-        if _looks_like_numero_header(header[i]) or _column_follows_row_index(col_vals):
-            # Colonne qui ressemble à une numérotation (header "N°" ou valeurs 1,2,3...)
-            # → on l'exclut sauf si elle contient du texte long (dans ce cas c'est pas juste un n°)
-            has_text = any(v and (len(v) > 15 or ' ' in v.strip()) for v in col_vals)
-            if not has_text:
-                continue
+        # Exclure les colonnes dont le header ressemble clairement à un numéro
+        if _looks_like_numero_header(header[i]):
+            continue
+        # Exclure les colonnes sans header (probablement un index de ligne redondant)
+        if not header[i].strip():
+            continue
         data_col_indices.append(i)
     # Construire les labels à partir des headers (tels quels, juste formatés joliment)
     data_col_labels = {}
     for i in data_col_indices:
         label = header_raw[i] if i < len(header_raw) and header_raw[i] else ''
-        label = fix_word_breaks(label).strip()
+        label = re.sub(r'\s+', ' ', label).strip()
         # Capitaliser proprement la première lettre
         if label:
             label = label[0].upper() + label[1:]
