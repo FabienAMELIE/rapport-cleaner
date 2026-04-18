@@ -165,6 +165,9 @@ def strip_choc(text):
         garbled = bool(re.match(r'^[a-zA-Z]\s*[,\.]',s)) or \
                   len(re.findall(r'\b[a-zA-ZÀ-ÿ]\b',s))>2 or (s and len(s)<8)
         if garbled or not s: return t
+    # Si le résultat est un seul mot isolé (résidu du choc), on considère que tout est du choc
+    if s and len(s.split()) <= 1 and not has_hs:
+        return ''
     return s
 
 NOISE_WORDS = {'rien','a','à','signaler','ras','condamné','condamne','choc',
@@ -294,22 +297,12 @@ def detect_structure(pdf_path):
         tables = page.extract_tables()
         if not tables or not tables[0]: return None
         header_raw = tables[0][0]
-        # Pour les headers : simple remplacement des retours à la ligne par espaces (pas fix_word_breaks
-        # qui peut fusionner des mots courts comme "Photo\nQuai" → "photoquai")
         header = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in header_raw]
-    # Style nom_commentaire : inchangé
     if any('nom' in h for h in header) and any('commentaire' in h for h in header):
         return {'style': 'nom_commentaire', 'headers': header}
 
-    # Identifier les colonnes photo (pour les exclure du flux texte)
     photo_cols = [i for i, h in enumerate(header) if _looks_like_photo_header(h)]
 
-    # Détecter la colonne numéro d'équipement avec la nouvelle logique
-    # Règle :
-    #  - Si la 1ère col a header "N°/Numéro" ET la 2ème ne ressemble pas à une col numéro → on prend la 1ère
-    #  - Si les deux ressemblent à des numéros (header ou contenu) → on prend la 2ème SAUF si
-    #    la 2ème suit exactement l'index de ligne et la 1ère aussi : dans ce cas on prend la 1ère
-    #  - On détecte un "saut" dans la 2ème col (valeurs non-numériques ou qui ne suivent pas l'index) → 2ème
     n_col = None
     if len(header) >= 1:
         col0_header_numeric = _looks_like_numero_header(header[0])
@@ -322,10 +315,7 @@ def detect_structure(pdf_path):
         col1_follows = _column_follows_row_index(col1_vals)
 
         if col0_header_numeric or col0_numeric:
-            # La 1ère colonne est une candidate
             if col1_header_numeric or col1_numeric:
-                # Les deux candidates → on prend la 2ème si elle ne suit pas l'index,
-                # ou si son header est plus explicite (N°, Numéro)
                 if not col1_follows or col1_header_numeric:
                     n_col = 1
                 else:
@@ -333,43 +323,56 @@ def detect_structure(pdf_path):
             else:
                 n_col = 0
         elif col1_header_numeric or col1_numeric:
-            # Seule la 2ème est candidate
             n_col = 1
 
     if n_col is None: n_col = 0
 
-    # Colonnes de données = toutes les colonnes qui ne sont ni photo ni n_col
-    # On exclut uniquement les colonnes qui ont un header de type "N°"/"Numéro" (redondantes)
-    # ou un header vide (colonne sans nom = probablement un index de ligne inutile)
-    # On ne filtre PAS sur le contenu de la page 1 (une colonne peut être vide page 1 mais remplie page 3)
-    data_col_indices = []
+    # Candidats : colonnes non photo, non n_col, non header numéro, non header vide
+    candidate_cols = []
     for i in range(len(header)):
         if i == n_col: continue
         if i in photo_cols: continue
-        # Exclure les colonnes dont le header ressemble clairement à un numéro
-        if _looks_like_numero_header(header[i]):
-            continue
-        # Exclure les colonnes sans header (probablement un index de ligne redondant)
-        if not header[i].strip():
-            continue
-        data_col_indices.append(i)
-    # Construire les labels à partir des headers (tels quels, juste formatés joliment)
+        if _looks_like_numero_header(header[i]): continue
+        if not header[i].strip(): continue
+        candidate_cols.append(i)
+
+    # Scanner TOUTES les pages pour ne garder que les colonnes avec du contenu utile
+    cols_with_content = set()
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            page_tables = page.extract_tables()
+            if not page_tables: continue
+            for ri, row in enumerate(page_tables[0]):
+                if ri == 0: continue
+                for ci in candidate_cols:
+                    if ci >= len(row) or not row[ci]: continue
+                    val = re.sub(r'\s+', ' ', row[ci]).strip()
+                    if not val: continue
+                    vl = val.lower()
+                    if vl in ('ras', 'x', '/', '', 'condamné', 'condamne'): continue
+                    cols_with_content.add(ci)
+
+    data_col_indices = [i for i in candidate_cols if i in cols_with_content]
+
     data_col_labels = {}
     for i in data_col_indices:
         label = header_raw[i] if i < len(header_raw) and header_raw[i] else ''
         label = re.sub(r'\s+', ' ', label).strip()
-        # Capitaliser proprement la première lettre
         if label:
             label = label[0].upper() + label[1:]
         data_col_labels[i] = label or f"Colonne {i+1}"
 
     n_photos = max(2, min(6, len(photo_cols))) if photo_cols else 3
 
+    # Stocker le header normalisé pour comparaison pages 2+
+    header_normalized = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in header_raw]
+
     return {'style': 'standard', 'headers': header, 'n_col': n_col,
             'data_col_indices': data_col_indices,
             'data_col_labels': data_col_labels,
             'photo_cols': photo_cols,
-            'n_photos': n_photos}
+            'n_photos': n_photos,
+            'header_normalized': header_normalized}
 
 def detect_unknown_words(pdf_path, corrections, blacklist):
     KNOWN = {
@@ -390,12 +393,18 @@ def detect_unknown_words(pdf_path, corrections, blacklist):
         'arrêt','urgence','complet','contact','manque','mfz','lsf','pi','pb','ph',
         'auto','manu','béquille','charnière','supérieur','inférieur',
     }
-    unknowns = set()
+    unknowns = {}  # mot → set de N° d'équipement où il apparaît
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             if not tables: continue
             for row in tables[0][1:]:
+                # Trouver le N° de cette ligne (col 0 ou 1)
+                n_val = ''
+                for ci in range(min(2, len(row))):
+                    if row[ci] and re.search(r'\d', row[ci]):
+                        n_val = fix_word_breaks(row[ci]).strip()
+                        break
                 for cell in row:
                     if not cell: continue
                     t = fix_word_breaks(cell).lower()
@@ -403,7 +412,8 @@ def detect_unknown_words(pdf_path, corrections, blacklist):
                     for word in re.findall(r'[a-zA-ZÀ-ÿ]{4,}', t):
                         if word not in KNOWN and not is_blacklisted_full(word, blacklist):
                             if len(word) <= 15:
-                                unknowns.add(word)
+                                unknowns.setdefault(word, set())
+                                if n_val: unknowns[word].add(n_val)
     return unknowns
 
 # ── Génération PDF ────────────────────────────────────────────────────────────
@@ -490,18 +500,22 @@ def extract_and_map_images(pdf_path, img_dir, n_col=1):
                 else: img_map[nv].extend(names)
     return img_map
 
-def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_fn=None):
+def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_fn=None, progress_fn=None):
     def log(msg):
         if log_fn: log_fn(msg)
+    def progress(val):
+        if progress_fn: progress_fn(val)
     style = structure.get('style', 'standard')
     img_dir = os.path.join(tempfile.gettempdir(), 'rapport_cleaner_imgs')
     img_n_col = structure.get('n_col', 0)
     if style == 'nom_commentaire': img_n_col = 0
 
+    progress(55)
     log("Extraction des images...")
     img_map = extract_and_map_images(pdf_path, img_dir, n_col=img_n_col)
     log(f"  → {sum(len(v) for v in img_map.values())} image(s) pour {len(img_map)} ligne(s)")
 
+    progress(70)
     log("Lecture du tableau...")
     if style == 'nom_commentaire':
         rows_data, quais = _read_nom_commentaire(pdf_path, corrections, blacklist)
@@ -509,6 +523,7 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
         rows_data = _read_standard(pdf_path, structure, corrections, blacklist)
         quais = None
 
+    progress(85)
     log("Génération du PDF...")
     _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log)
     log(f"✓ PDF généré : {output_path}")
@@ -516,6 +531,7 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
 def _read_standard(pdf_path, structure, corrections, blacklist):
     n_col = structure.get('n_col', 0)
     data_col_indices = structure.get('data_col_indices', [])
+    header_normalized = structure.get('header_normalized', [])
     rows_data = []; seen = set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -523,7 +539,11 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
             if not tables: continue
             for ri, row in enumerate(tables[0]):
                 if not row: continue
-                if ri == 0: continue  # première ligne = header, on skip
+                # Skip si c'est un header répété (comparer avec le header page 1)
+                if ri == 0:
+                    row_norm = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in row]
+                    if row_norm == header_normalized:
+                        continue  # header répété, on skip
                 n_raw = row[n_col] if n_col < len(row) else ''
                 # Ligne sans numéro : note globale technicien
                 if not n_raw or not n_raw.strip():
@@ -539,9 +559,30 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
                     continue
                 n = fix_word_breaks(n_raw).strip()
                 if not n or n in ('N','N°','#','Numéros','Numéro','Numero','∑') or n in seen: continue
-                # Détecter une ligne qui est en réalité un header répété (valeurs = mots de header)
                 if re.search(r'[a-zA-Z]{3,}', n) and not re.search(r'\d', n):
                     if n.lower() in ('n','n°','numéros','numéro','numero','image','photo','porte','niveleur','sas'): continue
+                # Si le N° est un texte long (>15 chars avec espaces), c'est du contenu, pas un numéro
+                # Ex: "Barrière manque 1 morceau la lisse normalement 6060/110 + support lisse"
+                if len(n) > 15 and n.count(' ') >= 2:
+                    # Utiliser le texte comme contenu dans la première colonne de données
+                    n_display = re.sub(r'\d+', '', n.split()[0]).strip() or n.split()[0]
+                    n_display = n_display.capitalize()
+                    cleaned_n = clean_cell(n, corrections, blacklist)
+                    if not cleaned_n and not any(
+                        row[idx] and clean_cell(fix_word_breaks(row[idx]), corrections, blacklist)
+                        for idx in data_col_indices if idx < len(row)):
+                        continue  # tout est vide, on skip
+                    if n_display in seen: continue
+                    seen.add(n_display)
+                    fields = [cleaned_n] + [''] * max(0, len(data_col_indices) - 1)
+                    # Remplir les autres colonnes normalement
+                    for fi, idx in enumerate(data_col_indices):
+                        raw = row[idx] if idx < len(row) and row[idx] else ''
+                        val = clean_cell(raw, corrections, blacklist)
+                        if val and fi < len(fields):
+                            fields[fi] = fields[fi] + (' / ' + val if fields[fi] else val)
+                    rows_data.append((len(rows_data), n_display) + tuple(fields))
+                    continue
                 seen.add(n)
                 fields = []
                 for idx in data_col_indices:
@@ -1139,13 +1180,15 @@ class App(_AppBase):
                   relief='flat',padx=14,pady=8,font=('Helvetica',9),cursor='hand2',
                   activebackground=C_CARD).pack(side='left',padx=(8,0))
 
-        # Progress
+        # Progress bar (mode déterministe, cachée au repos)
         pf=tk.Frame(self,bg=C_BG); pf.pack(fill='x',padx=20,pady=(0,4))
         s=ttk.Style(); s.theme_use('default')
-        s.configure('Blue.Horizontal.TProgressbar',troughcolor=C_ENTRY_BG,
+        s.configure('Red.Horizontal.TProgressbar',troughcolor=C_ENTRY_BG,
                     background=C_ACCENT,borderwidth=0,lightcolor=C_ACCENT,darkcolor=C_ACCENT)
-        self.progress=ttk.Progressbar(pf,mode='indeterminate',length=560,
-                                      style='Blue.Horizontal.TProgressbar')
+        s.configure('Green.Horizontal.TProgressbar',troughcolor=C_ENTRY_BG,
+                    background=C_SUCCESS,borderwidth=0,lightcolor=C_SUCCESS,darkcolor=C_SUCCESS)
+        self.progress=ttk.Progressbar(pf,mode='determinate',maximum=100,value=0,length=560,
+                                      style='Red.Horizontal.TProgressbar')
         self.progress.pack(fill='x')
 
         # Journal
@@ -1167,6 +1210,8 @@ class App(_AppBase):
         tk.Button(bf,text="Effacer le journal",command=self._clear_log,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
                   font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
+        # Version en bas à droite
+        tk.Label(bf,text="V0.1",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
 
     def _section(self, label):
         f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
@@ -1219,8 +1264,13 @@ class App(_AppBase):
         self._log(f"📂 {name}")
 
     def _pick_out(self):
+        # Pré-remplir avec le nom et le dossier du fichier de sortie déjà proposé
+        current_out = self.out_path.get()
+        init_dir = os.path.dirname(current_out) if current_out else ''
+        init_file = os.path.basename(current_out) if current_out else ''
         path=filedialog.asksaveasfilename(title="Enregistrer le PDF nettoyé",
-            defaultextension=".pdf",filetypes=[("Fichiers PDF","*.pdf")])
+            defaultextension=".pdf",filetypes=[("Fichiers PDF","*.pdf")],
+            initialdir=init_dir, initialfile=init_file)
         if path:
             self.out_path.set(path)
             self.lbl_out.config(text=f"  {os.path.basename(path)}",fg=C_TEXT)
@@ -1249,26 +1299,30 @@ class App(_AppBase):
         pdf=self.pdf_path.get(); out=self.out_path.get()
         if not pdf or not out: return
         self.btn_run.config(state='disabled')
-        self.progress.start(10)
+        self._set_progress(0)
         self._log("\n─── Démarrage ───")
         def worker():
             try:
+                self._set_progress(10)
                 self._log("Analyse de la structure...")
                 structure=detect_structure(pdf)
                 if not structure:
                     self.after(0,lambda: self._log("❌ Impossible de lire le PDF.")); return
-                self._log(f"Structure : {structure.get('style')} — {list(structure.get('data_cols',{}).keys()) or 'nom/commentaire'}")
+                cols_info = list(structure.get('data_col_labels',{}).values()) if structure.get('style')=='standard' else ['nom/commentaire']
+                self._log(f"Structure : {structure.get('style')} — {cols_info}")
+                self._set_progress(30)
                 self._log("Analyse du vocabulaire...")
                 unknowns=detect_unknown_words(pdf,self.cfg.get('corrections',{}),self.cfg.get('blacklist',[]))
                 known_already=set(self.cfg.get('corrections',{}).keys())|set(self.cfg.get('known_ok',[]))
-                new_unknowns=unknowns-known_already
+                new_unknowns={w: locs for w, locs in unknowns.items() if w not in known_already}
                 if new_unknowns:
                     self.after(0,lambda u=new_unknowns: self._ask_unknowns(u,pdf,out,structure)); return
                 self._do_generate(pdf,out,structure)
             except Exception as e:
                 self.after(0,lambda: self._log(f"❌ Erreur : {e}"))
+                self.after(0,lambda: self._set_progress(0))
             finally:
-                self.after(0,self._stop_progress)
+                self.after(0,lambda: self.btn_run.config(state='normal'))
         threading.Thread(target=worker,daemon=True).start()
 
     def _ask_unknowns(self, unknowns, pdf, out, structure):
@@ -1290,11 +1344,13 @@ class App(_AppBase):
 
         decisions={}
         for word in sorted(unknowns):
+            locs = unknowns[word]  # set de N° d'équipement
+            loc_text = f" (N° {', '.join(sorted(locs))})" if locs else ""
             rf=tk.Frame(inner,bg=C_CARD,pady=8); rf.pack(fill='x',pady=2,padx=4)
 
-            # Mot
-            tk.Label(rf,text=f"  «{word}»",font=('Courier',9,'bold'),
-                     bg=C_CARD,fg=C_TEXT,width=20,anchor='w').pack(side='left')
+            # Mot + localisation
+            tk.Label(rf,text=f"  «{word}»{loc_text}",font=('Courier',9,'bold'),
+                     bg=C_CARD,fg=C_TEXT,width=35,anchor='w').pack(side='left')
 
             action=tk.StringVar(value='ok')
             correction=tk.StringVar(value='')
@@ -1356,21 +1412,33 @@ class App(_AppBase):
     def _do_generate(self, pdf, out, structure):
         def worker():
             try:
+                self._set_progress(50)
                 generate_pdf(pdf,out,structure,
                     self.cfg.get('corrections',{}),
                     self.cfg.get('blacklist',[]),
-                    log_fn=lambda m: self.after(0,lambda msg=m: self._log(msg)))
+                    log_fn=lambda m: self.after(0,lambda msg=m: self._log(msg)),
+                    progress_fn=lambda v: self.after(0,lambda val=v: self._set_progress(val)))
+                self.after(0,lambda: self._set_progress(100, done=True))
                 self.after(0,lambda: messagebox.showinfo("Terminé ✓",f"PDF généré avec succès !\n\n{out}"))
             except Exception as e:
                 self.after(0,lambda: self._log(f"❌ Erreur : {e}"))
                 self.after(0,lambda: messagebox.showerror("Erreur",str(e)))
+                self.after(0,lambda: self._set_progress(0))
             finally:
-                self.after(0,self._stop_progress)
                 self.after(0,lambda: self.btn_run.config(state='normal'))
         threading.Thread(target=worker,daemon=True).start()
 
-    def _stop_progress(self):
-        self.progress.stop()
+    def _set_progress(self, value, done=False):
+        """Met à jour la barre de progression (0-100). Si done=True, passe en vert puis reset."""
+        if done:
+            self.progress.configure(style='Green.Horizontal.TProgressbar')
+            self.progress['value'] = 100
+            # Reset après 2 secondes
+            self.after(2000, lambda: (self.progress.configure(style='Red.Horizontal.TProgressbar'),
+                                      self.progress.__setitem__('value', 0)))
+        else:
+            self.progress.configure(style='Red.Horizontal.TProgressbar')
+            self.progress['value'] = value
 
 if __name__ == '__main__':
     app = App()
