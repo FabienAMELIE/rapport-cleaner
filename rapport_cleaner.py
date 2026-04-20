@@ -394,11 +394,20 @@ def detect_unknown_words(pdf_path, corrections, blacklist):
         'auto','manu','béquille','charnière','supérieur','inférieur',
     }
     unknowns = {}  # mot → set de N° d'équipement où il apparaît
+    header_normalized = None
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             if not tables: continue
-            for row in tables[0][1:]:
+            # Mémoriser le header de la page 1 pour détecter les répétitions pages 2+
+            if header_normalized is None:
+                header_normalized = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in tables[0][0]]
+            for ri, row in enumerate(tables[0]):
+                if ri == 0: continue  # toujours skip la ligne 0
+                # Skip si c'est un header répété (pages 2+)
+                row_norm = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in row]
+                if row_norm == header_normalized:
+                    continue
                 # Trouver le N° de cette ligne (col 0 ou 1)
                 n_val = ''
                 for ci in range(min(2, len(row))):
@@ -837,7 +846,6 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 if 'traverse' in fl: add('Traverse déformée',n); matched=True
                 if 'devis' in fl: add('Devis en cours',n); matched=True
                 if 'cellule' in fl or 'asservissement' in fl: add('Absence cellule asservissement',n); matched=True
-                if is_sas and 'tendeur' in fl: addt('Tendeur L (long)',n,eq(fl)); matched=True
                 if not matched:
                     # Entrées dynamiques : découper sur séparateurs et compter chaque élément
                     segments = [s.strip() for s in re.split(r'\s*[+/,]\s*', f.strip()) if s.strip()]
