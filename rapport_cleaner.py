@@ -77,6 +77,7 @@ DEFAULT_BLACKLIST = [
     'sécurité ok', 'securite ok', 'condamné', 'condamne',
     'occupé par camion en permanence', 'vétuste', 'vetuste',
     'bavette supérieur vétuste', 'bavette superieur vetuste',
+    'compacteur',
 ]
 
 DEFAULT_CORRECTIONS = {
@@ -229,8 +230,9 @@ def clean_cell(text, corrections=None, blacklist=None):
     if not text: return ''
     t = fix_word_breaks(text)
     t = fix_fused_words(t)
+    t = strip_choc(t)                              # passe 1 : avant corrections
     if corrections: t = apply_corrections(t, corrections)
-    t = strip_choc(t)
+    t = strip_choc(t)                              # passe 2 : après corrections (ex: "pnx"→"panneau" ou "Choque"→"choc")
     t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+effectué\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'^[\s/\-,;.]+','',t); t = re.sub(r'[\s/\-,;.]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
@@ -576,10 +578,19 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
                     # Utiliser le texte comme contenu dans la première colonne de données
                     n_display = re.sub(r'\d+', '', n.split()[0]).strip() or n.split()[0]
                     n_display = n_display.capitalize()
-                    cleaned_n = clean_cell(n, corrections, blacklist)
-                    if not cleaned_n and not any(
+                    # Ignorer les labels génériques de type "Porte local technique", "Porte rampe", etc.
+                    # si toutes leurs colonnes de données sont vides/RAS après nettoyage
+                    _GENERIC_LABELS = {'porte','entrée','entree','local','rampe','chaufferie',
+                                       'bureau','accueil','couloir','escalier','sortie','accès','acces'}
+                    is_generic = n_display.lower() in _GENERIC_LABELS or \
+                                 n.split()[0].lower() in _GENERIC_LABELS
+                    all_data_empty = not any(
                         row[idx] and clean_cell(fix_word_breaks(row[idx]), corrections, blacklist)
-                        for idx in data_col_indices if idx < len(row)):
+                        for idx in data_col_indices if idx < len(row))
+                    if is_generic and all_data_empty:
+                        continue  # label de porte sans anomalie → skip
+                    cleaned_n = clean_cell(n, corrections, blacklist)
+                    if not cleaned_n and all_data_empty:
                         continue  # tout est vide, on skip
                     if n_display in seen: continue
                     seen.add(n_display)
@@ -761,7 +772,14 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     note_style=ParagraphStyle('note',fontSize=8.5,fontName='Helvetica-Oblique',
         textColor=colors.HexColor('#555555'),spaceAfter=4,leading=13)
     def eq(seg):
-        m=re.match(r'^\s*(\d+)\s*(?:x\s*)?',seg.strip()); return int(m.group(1)) if m else 1
+        s = seg.strip()
+        # Priorité : chiffre en début "3 tendeurs", "2 x ..."
+        m = re.match(r'^\s*(\d+)\s*(?:[xX*×]\s*)?', s)
+        if m and m.group(1) and int(m.group(1)) > 0:
+            return int(m.group(1))
+        # Chiffre en fin précédé de x, *, × : "Tendeur long x3", "Tendeur long *2", "Tendeur long ×1"
+        m2 = re.search(r'[xX*×]\s*(\d+)\s*$', s)
+        return int(m2.group(1)) if m2 else 1
     cats={}; tcats={}; vns=[]
     def add(c,n,q=1): cats.setdefault(c,{}); cats[c][n]=cats[c].get(n,0)+q
     def addt(l,n,q=1): tcats.setdefault(l,{}); tcats[l][n]=tcats[l].get(n,0)+q
@@ -779,14 +797,15 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 if n not in vns: vns.append(n)
             elif is_sas and ('tendeur' in fl or 'crochet' in fl or
                     re.search(r'\b\d+\s*(?:courts?|longs?|extensibles?)\b',fl) or
-                    re.search(r'\b\d+\s*[cls]\b',fl)):
+                    re.search(r'\b\d+\s*[cls]\b',fl) or
+                    re.search(r'(?:courts?|longs?|extensibles?)\s*[xX*×]\s*\d+',fl)):
                 for seg in re.split(r'[+,]',fl):
                     seg=seg.strip(); q=eq(seg)
                     if re.search(r'\bcrochets?\b',seg) or re.search(r'\b\d+\s*s\b',seg):
                         add('Crochet S',n,q); continue
                     ht='tendeur' in seg; he='extensible' in seg
-                    sc=bool(re.search(r'\b\d+\s*courts?\b|\b\d+\s*c\b',seg))
-                    sl=bool(re.search(r'\b\d+\s*longs?\b|\b\d+\s*l\b',seg))
+                    sc=bool(re.search(r'\b\d+\s*courts?\b|\b\d+\s*c\b|courts?\s*[xX*×]\s*\d+',seg))
+                    sl=bool(re.search(r'\b\d+\s*longs?\b|\b\d+\s*l\b|longs?\s*[xX*×]\s*\d+',seg))
                     dc2=bool(re.search(r'\btendeurs?\s+courts?\b',seg))
                     dl=bool(re.search(r'\btendeurs?\s+longs?\b',seg))
                     de=bool(re.search(r'\btendeurs?\s+\w*extensibles?\b|\bextensible\b',seg))
@@ -813,13 +832,14 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         if re.search(r'\bpanneau\s+(?:inter\w*|interm[eé]diaire)\b|\bpi\b|\binterm[eé]diaire\b|\binter\s*(?:hublot|hs|et|\b)',seg): add('Panneau intermédiaire',n,q)
                 not_vetuste = not bool(re.search(r'\bvétuste\b|\bvetuste\b', fl))
                 if 'suspente' in fl: add('Suspente à refaire',n); matched=True
+                has_bavette_flexible = False
                 if 'flexible' in fl and not_vetuste:
                     matched=True
-                    has_bavette   = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', fl))
+                    has_bavette_flexible = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', fl))
                     has_principal = 'principal' in fl
-                    if has_bavette and has_principal:
+                    if has_bavette_flexible and has_principal:
                         add('Flexible vérin bavette HS', n); add('Flexible vérin principal HS', n)
-                    elif has_bavette:
+                    elif has_bavette_flexible:
                         add('Flexible vérin bavette HS', n)
                     elif has_principal:
                         add('Flexible vérin principal HS', n)
@@ -832,7 +852,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     if 'spirale' in fl: add('Câble spirale HS', n)
                     else: add('Câble acier HS', n, eq(fl))
                 if ('butée' in fl or 'butee' in fl) and not_vetuste: add('Butée HS',n,eq(fl)); matched=True
-                if 'bavette' in fl and not_vetuste: add('Bavette HS',n); matched=True
+                # Bavette standalone uniquement si pas déjà couverte par "Flexible vérin bavette HS"
+                if 'bavette' in fl and not_vetuste and not has_bavette_flexible: add('Bavette HS',n); matched=True
                 if 'hublot' in fl and not_vetuste: add('Hublot HS',n); matched=True
                 if 'parachute' in fl and not_vetuste: add('Parachute HS',n); matched=True
                 if 'moteur' in fl and not_vetuste: add('Moteur HS',n); matched=True
@@ -1219,7 +1240,7 @@ class App(_AppBase):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
                   font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
         # Version en bas à droite
-        tk.Label(bf,text="V0.1",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
+        tk.Label(bf,text="V0.2",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
 
     def _section(self, label):
         f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
