@@ -147,8 +147,22 @@ def strip_choc(text):
         r'(?:(?:pb|pi|ph|panneau\s+(?:bas|intermédiaire|intermediaire|haut))\s*)?'
         r'(?:\+\s*(?:pb|pi|ph|panneau\s+(?:bas|intermédiaire|intermediaire|haut))\s*)*'
         r'(?:\+?\s*hublot\s+\w+(?:\s+\w+)?\s+[\d×x]+(?:x\d+)?\s*)?', re.IGNORECASE)
-    s = choc_re.sub('', t)
-    # Supprimer aussi "choqué(e)" standalone (ex: "cuve groupe hydraulique choquée")
+    # Étape 1 : filtrer les segments commençant par "choc" sans HS sur le texte original
+    # Couvre les patterns non reconnus par choc_re (ex: "choc rail ...", "choc pnx ...")
+    segs = re.split(r'\s*\+\s*', t)
+    kept = []
+    for seg in segs:
+        seg_s = seg.strip()
+        if re.match(r'^(?:léger\s+)?choc\b', seg_s, re.IGNORECASE):
+            if re.search(r'\bHS\b', seg_s, re.IGNORECASE):
+                kept.append(seg_s)
+            # sinon supprimé silencieusement
+        else:
+            kept.append(seg_s)
+    s = ' + '.join(x for x in kept if x)
+    # Étape 2 : choc_re sur ce qui reste (chocs non isolés par +)
+    s = choc_re.sub('', s)
+    # Étape 3 : supprimer "choqué(e)" standalone
     s = re.sub(r'\bchoquée?\b', '', s, flags=re.IGNORECASE)
     for pat in [r'\b\d{3,4}x\d{3,4}(?:x\d+)?\b', r'\bx\d+\b(?!\s*cm)',
                 r'\b(?:nordsud|nord|sud|ral\s*\d*)\b',
