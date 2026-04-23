@@ -128,6 +128,11 @@ def fix_word_breaks(text):
                 if m:
                     lw = m.group()
                     ends_c = bool(re.search(r'[^aeiouàâéèêëîïôùûüyAEIOUÀÂÉÈÊËÎÏÔÙÛÜY]$', lw))
+                    # Ne pas fusionner si le suffixe est une seule lettre consonne isolée
+                    # sauf si elle forme clairement une terminaison (ex: "s", "x" pluriels)
+                    # Ex: "Rebranchemen" + "t" → ne pas fusionner (résidu de coupure PDF)
+                    if len(nxt) == 1 and nxt.lower() not in {'s','x','e','é'}:
+                        result.append(line); i+=1; continue
                     if (ends_c or len(lw)<=11) and len(lw+nxt)>=5:
                         result.append(line.rstrip()[:m.start()]+lw+nxt); i+=2; continue
         result.append(line); i+=1
@@ -240,13 +245,31 @@ def fix_fused_words(text):
             text = re.sub(pat, repl, text, flags=re.IGNORECASE)
     return text
 
+def _propagate_hs(text):
+    """Si le dernier segment contient HS, le propage aux segments précédents qui n'en ont pas.
+    Ex: "Panneau bas + inter bas HS" → "Panneau bas HS + inter bas HS"
+    """
+    if not text or not re.search(r'\bHS\b', text, re.IGNORECASE): return text
+    segs = re.split(r'\s*\+\s*', text.strip())
+    if len(segs) <= 1: return text
+    # Vérifier que le dernier segment contient HS
+    if not re.search(r'\bHS\b', segs[-1], re.IGNORECASE): return text
+    result = []
+    for seg in segs:
+        seg_s = seg.strip()
+        if seg_s and not re.search(r'\bHS\b', seg_s, re.IGNORECASE):
+            seg_s = seg_s + ' HS'
+        result.append(seg_s)
+    return ' + '.join(result)
+
 def clean_cell(text, corrections=None, blacklist=None):
     if not text: return ''
     t = fix_word_breaks(text)
     t = fix_fused_words(t)
     t = strip_choc(t)                              # passe 1 : avant corrections
     if corrections: t = apply_corrections(t, corrections)
-    t = strip_choc(t)                              # passe 2 : après corrections (ex: "pnx"→"panneau" ou "Choque"→"choc")
+    t = strip_choc(t)                              # passe 2 : après corrections
+    t = _propagate_hs(t)                           # propagation HS au dernier segment
     t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+effectué\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'^[\s/\-,;.]+','',t); t = re.sub(r'[\s/\-,;.]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
@@ -588,12 +611,29 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
                     if n.lower() in ('n','n°','numéros','numéro','numero','image','photo','porte','niveleur','sas'): continue
                 # Si le N° est un texte long (>15 chars avec espaces), c'est du contenu, pas un numéro
                 # Ex: "Barrière manque 1 morceau la lisse normalement 6060/110 + support lisse"
+                # Ex: "63 porte local maintenance" → n_display = "63", suffixe ignoré
+                # Ex: "7 rampe" → déjà court, ne passe pas ici
                 if len(n) > 15 and n.count(' ') >= 2:
-                    # Utiliser le texte comme contenu dans la première colonne de données
-                    n_display = re.sub(r'\d+', '', n.split()[0]).strip() or n.split()[0]
-                    n_display = n_display.capitalize()
-                    # Ignorer les labels génériques de type "Porte local technique", "Porte rampe", etc.
-                    # si toutes leurs colonnes de données sont vides/RAS après nettoyage
+                    # Cas : texte long commençant par un chiffre → extraire le chiffre + suffixe contextuel
+                    m_num = re.match(r'^(\d+)\s*(.*)', n.strip())
+                    if m_num:
+                        num_part = m_num.group(1)
+                        suffix = m_num.group(2).strip()
+                        # Conserver le suffixe contextuel court (rampe, local...) mais ignorer les longs descriptifs
+                        _GENERIC_LABELS = {'porte','entrée','entree','local','rampe','chaufferie',
+                                           'bureau','accueil','couloir','escalier','sortie','accès','acces',
+                                           'fenwick','maintenance','studio','photo'}
+                        suffix_words = suffix.split()
+                        # Garder uniquement si le suffixe est court ET contient un mot contextuel connu
+                        if suffix_words and suffix_words[0].lower() in _GENERIC_LABELS and len(suffix_words) <= 3:
+                            n_display = f"{num_part} {suffix_words[0]}"
+                        else:
+                            n_display = num_part
+                    else:
+                        # Texte long commençant par un mot (ex: "Barrière manque 1 morceau...")
+                        n_display = re.sub(r'\d+', '', n.split()[0]).strip() or n.split()[0]
+                        n_display = n_display.capitalize()
+                    # Ignorer les labels génériques sans anomalie
                     _GENERIC_LABELS = {'porte','entrée','entree','local','rampe','chaufferie',
                                        'bureau','accueil','couloir','escalier','sortie','accès','acces'}
                     is_generic = n_display.lower() in _GENERIC_LABELS or \
@@ -603,7 +643,7 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
                         for idx in data_col_indices if idx < len(row))
                     if is_generic and all_data_empty:
                         continue  # label de porte sans anomalie → skip
-                    cleaned_n = clean_cell(n, corrections, blacklist)
+                    cleaned_n = clean_cell(n, corrections, blacklist) if not m_num else ''
                     if not cleaned_n and all_data_empty:
                         continue  # tout est vide, on skip
                     if n_display in seen: continue
@@ -813,7 +853,15 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     re.search(r'\b\d+\s*(?:courts?|longs?|extensibles?)\b',fl) or
                     re.search(r'\b\d+\s*[cls]\b',fl) or
                     re.search(r'(?:courts?|longs?|extensibles?)\s*[xX*×]\s*\d+',fl)):
-                for seg in re.split(r'[+,]',fl):
+                # Split sur + , et aussi sur transitions chiffre→type pour capturer "3 long 2 court 2 s"
+                raw_segs = re.split(r'[+,&/\\]', fl)
+                segs_sas = []
+                for rs in raw_segs:
+                    rs = rs.strip()
+                    # Redécouper sur transitions \d+ (long|court|extensible|crochet|s)
+                    parts = re.split(r'(?<=\s)(?=\d+\s*(?:longs?|courts?|extensibles?|crochets?|[lces]\b))', rs)
+                    segs_sas.extend([p.strip() for p in parts if p.strip()])
+                for seg in segs_sas:
                     seg=seg.strip(); q=eq(seg)
                     if re.search(r'\bcrochets?\b',seg) or re.search(r'\b\d+\s*s\b',seg):
                         add('Crochet S',n,q); continue
@@ -831,60 +879,82 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         m2=re.search(r'tendeurs?\s+([a-zA-Z])',seg); typ=m2.group(1).upper() if m2 else '?'
                     addt({'E':'Tendeur E (extensible)','L':'Tendeur L (long)','C':'Tendeur C (court)'}.get(typ,f'Tendeur {typ}'),n,q)
             else:
-                matched = False
-                hp=bool(re.search(r'\bpanneau\b|\binterm[eé]diaire\b|\bpi\b|\bpb\b|\bph\b',fl))
-                hj=bool(re.search(r'\bjoint\b',fl))
-                if hp or hj:
-                    matched = True
-                    for seg in re.split(r'[,+]|\bet\b',fl):
-                        seg=seg.strip()
-                        if not seg: continue
-                        q=eq(seg)
-                        if re.search(r'\bjoint\b',seg): add('Joint',n,q); continue
-                        if re.search(r'\bpanneau\s+bas\b|\bpb\b',seg): add('Panneau bas',n,q)
-                        if re.search(r'\bpanneau\s+haut\b|\bph\b',seg): add('Panneau haut',n,q)
-                        if re.search(r'\bpanneau\s+(?:inter\w*|interm[eé]diaire)\b|\bpi\b|\binterm[eé]diaire\b|\binter\s*(?:hublot|hs|et|\b)',seg): add('Panneau intermédiaire',n,q)
                 not_vetuste = not bool(re.search(r'\bvétuste\b|\bvetuste\b', fl))
-                if 'suspente' in fl: add('Suspente à refaire',n); matched=True
+                # Traitement segment par segment : chaque segment est testé contre les règles connues
+                # Les segments non reconnus tombent dans le bloc dynamique
+                # Cela évite que matched=True global fasse perdre des segments non reconnus
+                segments_full = [s.strip() for s in re.split(r'\s*[+/&,\\]\s*', f.strip()) if s.strip()]
                 has_bavette_flexible = False
+
+                # Passe 1 : détecter has_bavette_flexible sur la cellule entière (nécessaire pour éviter doublon bavette)
                 if 'flexible' in fl and not_vetuste:
-                    matched=True
                     has_bavette_flexible = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', fl))
-                    has_principal = 'principal' in fl
-                    if has_bavette_flexible and has_principal:
-                        add('Flexible vérin bavette HS', n); add('Flexible vérin principal HS', n)
-                    elif has_bavette_flexible:
-                        add('Flexible vérin bavette HS', n)
-                    elif has_principal:
-                        add('Flexible vérin principal HS', n)
-                    else:
-                        add('Flexible HS', n, eq(fl))
-                if 'verrou' in fl and not_vetuste: add('Verrou HS',n); matched=True
-                if 'roulette' in fl: add('Roulette manquante',n,eq(fl)); matched=True
-                if ('câble' in fl or 'cable' in fl) and not_vetuste:
-                    matched=True
-                    if 'spirale' in fl: add('Câble spirale HS', n)
-                    else: add('Câble acier HS', n, eq(fl))
-                if ('butée' in fl or 'butee' in fl) and not_vetuste: add('Butée HS',n,eq(fl)); matched=True
-                # Bavette standalone uniquement si pas déjà couverte par "Flexible vérin bavette HS"
-                if 'bavette' in fl and not_vetuste and not has_bavette_flexible: add('Bavette HS',n); matched=True
-                if 'hublot' in fl and not_vetuste: add('Hublot HS',n); matched=True
-                if 'parachute' in fl and not_vetuste: add('Parachute HS',n); matched=True
-                if 'moteur' in fl and not_vetuste: add('Moteur HS',n); matched=True
-                if ('relais' in fl or 'carte' in fl or 'électronique' in fl) and not_vetuste: add('Défaut électronique',n); matched=True
-                if ('spot' in fl or 'luminaire' in fl or 'led' in fl) and not_vetuste: add('Éclairage HS',n); matched=True
-                if ('poignée' in fl or 'poignet' in fl) and not_vetuste: add('Poignée HS',n); matched=True
-                if 'chasse' in fl and not_vetuste: add('Chasse-pied HS',n); matched=True
-                if ('béquille' in fl or 'bequille' in fl): add('Béquille sécurité absente',n); matched=True
-                if 'charnière' in fl and not_vetuste: add('Charnière HS',n); matched=True
-                if 'soudure' in fl: add('Soudure à refaire',n); matched=True
-                if 'traverse' in fl: add('Traverse déformée',n); matched=True
-                if 'devis' in fl: add('Devis en cours',n); matched=True
-                if 'cellule' in fl or 'asservissement' in fl: add('Absence cellule asservissement',n); matched=True
-                if not matched:
-                    # Entrées dynamiques : découper sur séparateurs et compter chaque élément
-                    segments = [s.strip() for s in re.split(r'\s*[+/,]\s*', f.strip()) if s.strip()]
-                    for seg in segments:
+
+                for seg in segments_full:
+                    sl = seg.lower()
+                    seg_matched = False
+                    q = eq(seg)
+
+                    # Panneaux et joints (testés sur le segment)
+                    hp = bool(re.search(r'\bpanneau\b|\binterm[eé]diaire\b|\bpi\b|\bpb\b|\bph\b', sl))
+                    hj = bool(re.search(r'\bjoint\b', sl))
+                    if hp or hj:
+                        seg_matched = True
+                        if re.search(r'\bjoint\b', sl): add('Joint', n, q)
+                        if re.search(r'\bpanneau\s+bas\b|\bpb\b', sl): add('Panneau bas', n, q)
+                        if re.search(r'\bpanneau\s+haut\b|\bph\b', sl): add('Panneau haut', n, q)
+                        if re.search(r'\bpanneau\s+(?:inter\w*|interm[eé]diaire)\b|\bpi\b|\binterm[eé]diaire\b|\binter\s*(?:hublot|hs|et|\b)', sl): add('Panneau intermédiaire', n, q)
+
+                    if 'suspente' in sl: add('Suspente à refaire', n); seg_matched = True
+                    if 'flexible' in sl and not_vetuste:
+                        seg_matched = True
+                        has_bav = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', sl))
+                        has_pri = 'principal' in sl
+                        if has_bav and has_pri:
+                            add('Flexible vérin bavette HS', n); add('Flexible vérin principal HS', n)
+                        elif has_bav:
+                            add('Flexible vérin bavette HS', n)
+                        elif has_pri:
+                            add('Flexible vérin principal HS', n)
+                        else:
+                            add('Flexible HS', n, eq(sl))
+                    if 'verrou' in sl and not_vetuste: add('Verrou HS', n); seg_matched = True
+                    if 'roulette' in sl: add('Roulette manquante', n, eq(sl)); seg_matched = True
+                    if ('câble' in sl or 'cable' in sl) and not_vetuste:
+                        has_repl = 'remplacement' in sl or 'remplacer' in sl
+                        has_hs_seg = 'hs' in sl
+                        if has_hs_seg or has_repl:
+                            seg_matched = True
+                            if re.search(r'spiral', sl): add('Câble spiralé HS', n)
+                            elif re.search(r'contact\s*mou?e?', sl): add('Contact mou de câble HS', n)
+                            elif re.search(r'tirage|levage|traction', sl): add('Câble de traction HS', n)
+                            else: add('Câble HS', n)
+                    if ('butée' in sl or 'butee' in sl) and not_vetuste:
+                        has_equerre = bool(re.search(r'\béquerre\b|\bequerre\b', sl))
+                        has_butee = bool(re.search(r'\bbutée\b|\bbutee\b', sl))
+                        if has_equerre and has_butee: add('Équerre et butée HS', n); seg_matched = True
+                        elif has_equerre: add('Équerre de butée HS', n); seg_matched = True
+                        else: add('Butée HS', n, eq(sl)); seg_matched = True
+                    if 'bavette' in sl and not_vetuste and not has_bavette_flexible: add('Bavette HS', n); seg_matched = True
+                    if 'hublot' in sl and not_vetuste: add('Hublot HS', n); seg_matched = True
+                    if 'parachute' in sl and not_vetuste: add('Parachute HS', n); seg_matched = True
+                    if 'moteur' in sl and not_vetuste: add('Moteur HS', n); seg_matched = True
+                    if ('relais' in sl or 'carte' in sl or 'électronique' in sl) and not_vetuste: add('Défaut électronique', n); seg_matched = True
+                    if ('spot' in sl or 'luminaire' in sl or 'led' in sl) and not_vetuste: add('Éclairage HS', n); seg_matched = True
+                    if ('poignée' in sl or 'poignet' in sl) and not_vetuste: add('Poignée HS', n); seg_matched = True
+                    if 'chasse' in sl and not_vetuste: add('Chasse-pied HS', n); seg_matched = True
+                    if ('béquille' in sl or 'bequille' in sl): add('Béquille sécurité absente', n); seg_matched = True
+                    if 'charnière' in sl and not_vetuste: add('Charnière HS', n); seg_matched = True
+                    if 'soudure' in sl: add('Soudure à refaire', n); seg_matched = True
+                    if 'traverse' in sl: add('Traverse déformée', n); seg_matched = True
+                    if 'devis' in sl: add('Devis en cours', n); seg_matched = True
+                    if 'cellule' in sl or 'asservissement' in sl: add('Absence cellule asservissement', n); seg_matched = True
+                    if ('corde' in sl or 'câble' in sl and 'traction' in sl) and not_vetuste:
+                        no_action = any(x in sl for x in ['a fixer','a refixer','stock client','remplacement effectué'])
+                        if not no_action: add('Corde HS', n); seg_matched = True
+
+                    # Segment non reconnu → bloc dynamique
+                    if not seg_matched:
                         label = _condense_summary_label(seg.strip().rstrip('.'))
                         if label: add(label, n)
     def fmt(lbl,d):
@@ -1254,7 +1324,7 @@ class App(_AppBase):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
                   font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
         # Version en bas à droite
-        tk.Label(bf,text="V0.2",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
+        tk.Label(bf,text="V0.2.2",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
 
     def _section(self, label):
         f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
