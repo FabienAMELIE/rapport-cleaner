@@ -337,7 +337,13 @@ def detect_structure(pdf_path):
         if not tables or not tables[0]: return None
         header_raw = tables[0][0]
         header = [re.sub(r'\s+', ' ', c).strip().lower() if c else '' for c in header_raw]
-    if any('nom' in h for h in header) and any('commentaire' in h for h in header):
+    # Robuste aux coupures pdfplumber ("Commenta\nire") et fautes de saisie ("Comentaire", "Commentair")
+    # → supprime les espaces avant comparaison, cherche le préfixe "comment" (≥7 chars, sans ambiguïté)
+    # → "nom"/"noms" vérifié par fullmatch pour éviter les faux positifs ("Dénomination", etc.)
+    _h_nospace = [''.join(h.split()) for h in header]
+    _has_nom = any(re.fullmatch(r'noms?', h) for h in _h_nospace)
+    _has_commentaire = any('comment' in h for h in _h_nospace)
+    if _has_nom and _has_commentaire:
         return {'style': 'nom_commentaire', 'headers': header}
 
     photo_cols = [i for i, h in enumerate(header) if _looks_like_photo_header(h)]
@@ -1324,7 +1330,7 @@ class App(_AppBase):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
                   font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
         # Version en bas à droite
-        tk.Label(bf,text="V0.2.2",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
+        tk.Label(bf,text="V0.2.3",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
 
     def _section(self, label):
         f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
