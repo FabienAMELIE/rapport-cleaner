@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.3.2"
+VERSION = "V0.3.3.3"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -1183,19 +1183,25 @@ def check_latest_version():
         return None, None
 
 def do_update(download_url, log_fn=None):
-    """Télécharge le nouveau .exe, écrit un .bat pour remplacer et relancer, puis quitte."""
+    """Télécharge le nouveau .exe dans Temp, écrit un .bat dans Temp pour remplacer et relancer."""
     def log(msg):
         if log_fn: log_fn(msg)
     try:
+        import tempfile
         exe_path = sys.executable
-        tmp_exe = exe_path + ".new"
+        pid = os.getpid()
+        tmp_dir = tempfile.gettempdir()
+        tmp_exe = os.path.join(tmp_dir, "RapportCleaner_update.exe")
+        bat_path = os.path.join(tmp_dir, "rc_updater.bat")
+
         log("Téléchargement en cours...")
         urllib.request.urlretrieve(download_url, tmp_exe)
-        log("Téléchargement terminé. Redémarrage...")
-        # Écrire le script de remplacement
-        bat_path = exe_path + "_updater.bat"
+        log("Téléchargement terminé. Fermeture et redémarrage...")
+
+        # Le .bat : tue le process courant par PID, attend, remplace, relance, se supprime
         bat_content = (
             "@echo off\n"
+            f"taskkill /f /pid {pid} >nul 2>&1\n"
             "timeout /t 2 /nobreak >nul\n"
             f"move /y \"{tmp_exe}\" \"{exe_path}\"\n"
             f"start \"\" \"{exe_path}\" {UPDATER_FLAG}\n"
@@ -1203,9 +1209,12 @@ def do_update(download_url, log_fn=None):
         )
         with open(bat_path, 'w') as f:
             f.write(bat_content)
-        subprocess.Popen([bat_path], shell=True, creationflags=subprocess.CREATE_NO_WINDOW
-                         if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
-        sys.exit(0)
+
+        flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+        subprocess.Popen([bat_path], shell=True, creationflags=flags)
+        # Laisser le .bat se lancer avant que Python quitte
+        import time; time.sleep(0.5)
+        os._exit(0)
     except Exception as e:
         log(f"Erreur mise à jour : {e}")
 
