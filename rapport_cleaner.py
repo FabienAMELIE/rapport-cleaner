@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.2"
+VERSION = "V0.3.2.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -1302,18 +1302,18 @@ class SettingsWindow(tk.Toplevel):
         self._upd_lbl=tk.Label(tab4,textvariable=self._upd_status,bg=C_CARD,fg=C_TEXT2,
                                font=('Helvetica',9),wraplength=540,justify='left')
         self._upd_lbl.pack(anchor='w',padx=16,pady=(0,10))
-        self._upd_btn_dl=tk.Button(tab4,text="Télécharger et installer",
-                                   command=self._do_update,bg=C_ACCENT,fg='white',
-                                   relief='flat',padx=18,pady=8,cursor='hand2',
-                                   font=('Helvetica',10,'bold'))
         # Bouton téléchargement masqué par défaut
         self._upd_download_url=None
         upd_btn_f=tk.Frame(tab4,bg=C_CARD); upd_btn_f.pack(anchor='w',padx=16)
         tk.Button(upd_btn_f,text="Vérifier les mises à jour",command=self._check_update,
                   bg=C_PANEL,fg=C_TEXT,relief='flat',padx=18,pady=8,cursor='hand2',
                   font=('Helvetica',10,'bold')).pack(side='left',padx=(0,10))
-        self._upd_btn_dl.pack_forget()
-        self._upd_btn_dl_frame=upd_btn_f
+        # Bouton créé comme enfant de upd_btn_f (pas tab4) pour que pack() fonctionne correctement
+        self._upd_btn_dl=tk.Button(upd_btn_f,text="Télécharger et installer",
+                                   command=self._do_update,bg=C_ACCENT,fg='white',
+                                   relief='flat',padx=18,pady=8,cursor='hand2',
+                                   font=('Helvetica',10,'bold'))
+        # Masqué par défaut, révélé quand une MAJ est détectée
 
         # ── Boutons bas ───────────────────────────────────────────────────────
         bot=tk.Frame(self,bg=C_BG); bot.pack(fill='x',padx=12,pady=(0,12))
@@ -1408,7 +1408,7 @@ class SettingsWindow(tk.Toplevel):
                     self._upd_status.set(f"Nouvelle version disponible : {t}\nCliquez sur le bouton pour mettre à jour.")
                     self._upd_lbl.config(fg=C_ACCENT)
                     if u:
-                        self._upd_btn_dl.pack(side='left', in_=self._upd_btn_dl_frame)
+                        self._upd_btn_dl.pack(side='left', padx=(10,0))
                     else:
                         self._upd_status.set(f"Nouvelle version disponible : {t}\nMais le fichier .exe est introuvable dans la release.")
                 self.after(0, show_dl)
