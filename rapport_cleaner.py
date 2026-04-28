@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.3"
+VERSION = "V0.3.3.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -1233,13 +1233,13 @@ class SettingsWindow(tk.Toplevel):
     def _build(self):
         s=ttk.Style(); s.theme_use('default')
         s.configure('S.TNotebook',background=C_BG,borderwidth=0)
-        s.configure('S.TNotebook.Tab',background=C_PANEL,foreground=C_TEXT2,padding=[14,6],font=('Helvetica',9))
+        s.configure('S.TNotebook.Tab',background=C_PANEL,foreground=C_TEXT2,padding=[14,7],font=('Helvetica',10))
         s.map('S.TNotebook.Tab',background=[('selected',C_CARD)],foreground=[('selected',C_TEXT)])
         nb=ttk.Notebook(self,style='S.TNotebook')
         nb.pack(fill='both',expand=True,padx=12,pady=12)
 
         # ── Onglet 0 — Options générales ─────────────────────────────────────
-        tab0=tk.Frame(nb,bg=C_CARD); nb.add(tab0,text='  ⚙  Options générales  ')
+        tab0=tk.Frame(nb,bg=C_CARD); nb.add(tab0,text='  ≡  Options générales  ')
         tk.Label(tab0,text="Apparence",font=('Helvetica',10,'bold'),bg=C_CARD,fg=C_TEXT).pack(anchor='w',padx=16,pady=(16,6))
         tk.Frame(tab0,bg=C_BORDER,height=1).pack(fill='x',padx=16,pady=(0,12))
         theme_f=tk.Frame(tab0,bg=C_CARD); theme_f.pack(fill='x',padx=16,pady=(0,8))
