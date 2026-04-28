@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.3.1"
+VERSION = "V0.3.3.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -1239,7 +1239,7 @@ class SettingsWindow(tk.Toplevel):
         nb.pack(fill='both',expand=True,padx=12,pady=12)
 
         # ── Onglet 0 — Options générales ─────────────────────────────────────
-        tab0=tk.Frame(nb,bg=C_CARD); nb.add(tab0,text='  ≡  Options générales  ')
+        tab0=tk.Frame(nb,bg=C_CARD); nb.add(tab0,text='  Options générales  ')
         tk.Label(tab0,text="Apparence",font=('Helvetica',10,'bold'),bg=C_CARD,fg=C_TEXT).pack(anchor='w',padx=16,pady=(16,6))
         tk.Frame(tab0,bg=C_BORDER,height=1).pack(fill='x',padx=16,pady=(0,12))
         theme_f=tk.Frame(tab0,bg=C_CARD); theme_f.pack(fill='x',padx=16,pady=(0,8))
@@ -1253,7 +1253,7 @@ class SettingsWindow(tk.Toplevel):
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),wraplength=580).pack(anchor='w',padx=16,pady=(8,0))
 
         # ── Onglet 1 — Blacklist ──────────────────────────────────────────────
-        tab1=tk.Frame(nb,bg=C_CARD); nb.add(tab1,text='  🚫  Blacklist  ')
+        tab1=tk.Frame(nb,bg=C_CARD); nb.add(tab1,text='  Blacklist  ')
         tk.Label(tab1,text="Termes à ignorer.\n• Cellule contenant uniquement ce terme → supprimée.\n• Cellule contenant ce terme parmi d'autres → seul ce terme est retiré.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),justify='left',wraplength=640).pack(anchor='w',padx=12,pady=(10,4))
         lf1=tk.Frame(tab1,bg=C_CARD); lf1.pack(fill='both',expand=True,padx=12,pady=(0,4))
@@ -1277,7 +1277,7 @@ class SettingsWindow(tk.Toplevel):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
         # ── Onglet 2 — Corrections ────────────────────────────────────────────
-        tab2=tk.Frame(nb,bg=C_CARD); nb.add(tab2,text='  ✏️  Corrections  ')
+        tab2=tk.Frame(nb,bg=C_CARD); nb.add(tab2,text='  Corrections  ')
         tk.Label(tab2,text='Corrections automatiques de mots (mot erroné → correction)',
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=12,pady=(10,4))
         lf2=tk.Frame(tab2,bg=C_CARD); lf2.pack(fill='both',expand=True,padx=12,pady=(0,4))
@@ -1300,7 +1300,7 @@ class SettingsWindow(tk.Toplevel):
                   relief='flat',padx=8,pady=3,cursor='hand2').pack(side='left')
 
         # ── Onglet 3 — Mots acceptés ──────────────────────────────────────────
-        tab3=tk.Frame(nb,bg=C_CARD); nb.add(tab3,text='  ✅  Mots acceptés  ')
+        tab3=tk.Frame(nb,bg=C_CARD); nb.add(tab3,text='  Mots acceptés  ')
         tk.Label(tab3,text="Mots que l'outil ne signalera plus comme inconnus.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=12,pady=(10,4))
         of=tk.Frame(tab3,bg=C_CARD); of.pack(fill='both',expand=True,padx=12,pady=(0,4))
@@ -1324,7 +1324,7 @@ class SettingsWindow(tk.Toplevel):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
         # ── Onglet 4 — Mises à jour ──────────────────────────────────────────────
-        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  🔄  Mises à jour  ')
+        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  Mises à jour  ')
         tk.Label(tab4,text="Vérifier si une nouvelle version de Rapport Cleaner est disponible.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=16,pady=(16,4))
         tk.Label(tab4,text=f"Version actuelle : {VERSION}",
@@ -1519,7 +1519,7 @@ class App(_AppBase):
             print(f"Logo accueil : {e}")
             tk.Label(title_f,text="Rapport Cleaner",font=('Helvetica',18,'bold'),bg=C_BG,fg=C_TEXT).grid(row=0, column=1)
 
-        tk.Button(title_f,text="⚙  Paramètres",command=self._open_settings,
+        tk.Button(title_f,text="≡  Paramètres",command=self._open_settings,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=5,
                   font=('Helvetica',9),cursor='hand2',
                   activebackground=C_CARD,activeforeground=C_TEXT).grid(row=0, column=2, sticky='e')
