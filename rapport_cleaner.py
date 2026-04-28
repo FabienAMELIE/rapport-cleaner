@@ -20,8 +20,9 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                  Paragraph, Spacer, Image as RLImage)
 from reportlab.lib.units import mm
+from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.2.4"
+VERSION = "V0.2.5"
 
 def resource_path(filename):
     """Retourne le chemin absolu vers une ressource (compatible PyInstaller)."""
@@ -189,16 +190,24 @@ def strip_choc(text):
         r'(?:(?:pb|pi|ph|panneau\s+(?:bas|intermédiaire|intermediaire|haut))\s*)?'
         r'(?:\+\s*(?:pb|pi|ph|panneau\s+(?:bas|intermédiaire|intermediaire|haut))\s*)*'
         r'(?:\+?\s*hublot\s+\w+(?:\s+\w+)?\s+[\d×x]+(?:x\d+)?\s*)?', re.IGNORECASE)
-    # Étape 1 : filtrer les segments commençant par "choc" sans HS sur le texte original
-    # Couvre les patterns non reconnus par choc_re (ex: "choc rail ...", "choc pnx ...")
+    # Étape 1 : filtrer les segments commençant par "choc" sans HS
+    # Si le segment contient du contenu utile APRES le choc, le conserver
+    # Ex: "Choc PB Suspente a refaire..." -> strip choc -> "Suspente a refaire..." (GARDE)
+    # Ex: "Choc PB" -> strip choc -> "" (SUPPRIME)
     segs = re.split(r'\s*\+\s*', t)
     kept = []
     for seg in segs:
         seg_s = seg.strip()
         if re.match(r'^(?:léger\s+)?choc\b', seg_s, re.IGNORECASE):
             if re.search(r'\bHS\b', seg_s, re.IGNORECASE):
-                kept.append(seg_s)
-            # sinon supprimé silencieusement
+                kept.append(seg_s)  # Garder si HS present
+            else:
+                # Appliquer choc_re pour extraire le contenu non-choc residuel
+                residual = choc_re.sub('', seg_s).strip()
+                residual = re.sub(r'^[\s\+\-,;.]+', '', residual).strip()
+                if residual:
+                    kept.append(residual)  # Garder le contenu utile apres choc
+                # sinon segment purement choc -> supprime
         else:
             kept.append(seg_s)
     s = ' + '.join(x for x in kept if x)
@@ -267,6 +276,8 @@ _FUSED_PATTERNS = [
     (r'\bflexible(verin|vérin)\b', lambda m: 'flexible ' + m.group(1)),
     # verin + type
     (r'\b(verin|vérin)(bavette|principal|lèvre|levre)\b', lambda m: m.group(1) + ' ' + m.group(2)),
+    # choc + panneau colles sans espace : ChocPB -> Choc PB
+    (r'\bchoc(pb|pi|ph)\b', lambda m: 'Choc ' + m.group(1).upper()),
     # absence + de
     (r'\babsencede\b', 'absence de'),
     # cellule + d
@@ -302,6 +313,8 @@ def _propagate_hs(text):
 def clean_cell(text, corrections=None, blacklist=None):
     if not text: return ''
     t = fix_word_breaks(text)
+    # Normaliser les '+' sans espaces (ex: 'ChocPB+PI' apres fix_fused_words → 'Choc PB+PI' → 'Choc PB + PI')
+    t = re.sub(r'(?<=[^\s])\+(?=[^\s])', ' + ', t)
     t = fix_fused_words(t)
     t = strip_choc(t)                              # passe 1 : avant corrections
     if corrections: t = apply_corrections(t, corrections)
@@ -832,16 +845,30 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
 
-    def _draw_version(canvas, doc):
-        canvas.saveState()
-        canvas.setFont('Helvetica', 7)
-        canvas.setFillColor(colors.HexColor('#aaaaaa'))
-        canvas.drawRightString(landscape(A4)[0] - 10*mm, 5*mm, VERSION)
-        canvas.restoreState()
+    class _LastPageCanvas(_BaseCanvas):
+        """Affiche la version uniquement sur la derniere page, sans creer de page supplementaire."""
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_page_states = []
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
+        def save(self):
+            n_pages = len(self._saved_page_states)
+            for i, state in enumerate(self._saved_page_states):
+                self.__dict__.update(state)
+                if i == n_pages - 1:
+                    self.saveState()
+                    self.setFont('Helvetica', 7)
+                    self.setFillColor(colors.HexColor('#aaaaaa'))
+                    self.drawRightString(landscape(A4)[0] - 10*mm, 5*mm, VERSION)
+                    self.restoreState()
+                super().showPage()
+            super().save()
 
     doc = SimpleDocTemplate(output_path, pagesize=landscape(A4),
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
-    doc.build(story, onFirstPage=_draw_version, onLaterPages=_draw_version)
+    doc.build(story, canvasmaker=_LastPageCanvas)
 
 def _condense_summary_label(text):
     """Condense les textes avec dimensions pour le résumé.
@@ -898,9 +925,10 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         for ci,f in enumerate(row[2:]):
             if not f: continue
             fl=f.lower(); is_sas=(ci in sas_indices)
+            # Vidange : detection non-exclusive (une meme cellule peut aussi avoir d'autres anomalies)
             if 'vidange' in fl or 'hydraulique' in fl:
                 if n not in vns: vns.append(n)
-            elif is_sas and ('tendeur' in fl or 'crochet' in fl or
+            if is_sas and ('tendeur' in fl or 'crochet' in fl or
                     re.search(r'\b\d+\s*(?:courts?|longs?|extensibles?)\b',fl) or
                     re.search(r'\b\d+\s*[cls]\b',fl) or
                     re.search(r'(?:courts?|longs?|extensibles?)\s*[xX*×]\s*\d+',fl)):
@@ -915,7 +943,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 for seg in segs_sas:
                     seg=seg.strip(); q=eq(seg)
                     if re.search(r'\bcrochets?\b',seg) or re.search(r'\b\d+\s*s\b',seg):
-                        add('Crochet S',n,q); continue
+                        addt('Crochet S',n,q); continue
                     ht='tendeur' in seg; he='extensible' in seg
                     sc=bool(re.search(r'\b\d+\s*courts?\b|\b\d+\s*c\b|courts?\s*[xX*×]\s*\d+',seg))
                     sl=bool(re.search(r'\b\d+\s*longs?\b|\b\d+\s*l\b|longs?\s*[xX*×]\s*\d+',seg))
@@ -971,10 +999,16 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                             add('Flexible HS', n, eq(sl))
                     if 'verrou' in sl and not_vetuste: add('Verrou HS', n); seg_matched = True
                     if 'roulette' in sl: add('Roulette manquante', n, eq(sl)); seg_matched = True
-                    if ('câble' in sl or 'cable' in sl) and not_vetuste:
+                    # Regle omega : prioritaire sur 'Cable HS' generique
+                    if re.search(r'\boméga\b|\bomega\b|passage\s+de\s+c[âa]ble\s+ext', sl, re.IGNORECASE):
+                        add('Oméga passage de câble HS', n); seg_matched = True
+                    elif ('câble' in sl or 'cable' in sl) and not_vetuste:
                         has_repl = 'remplacement' in sl or 'remplacer' in sl
                         has_hs_seg = 'hs' in sl
-                        if has_hs_seg or has_repl:
+                        is_traction_levage = bool(re.search(r'c[âa]bles?\s+de\s+(traction|levage)', sl, re.IGNORECASE))
+                        if is_traction_levage and not has_hs_seg and not has_repl:
+                            add('Câble de traction/levage à remplacer', n); seg_matched = True
+                        elif has_hs_seg or has_repl:
                             seg_matched = True
                             if re.search(r'spiral', sl): add('Câble spiralé HS', n)
                             elif re.search(r'contact\s*mou?e?', sl): add('Contact mou de câble HS', n)
@@ -985,7 +1019,11 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         has_butee = bool(re.search(r'\bbutée\b|\bbutee\b', sl))
                         if has_equerre and has_butee: add('Équerre et butée HS', n); seg_matched = True
                         elif has_equerre: add('Équerre de butée HS', n); seg_matched = True
-                        else: add('Butée HS', n, eq(sl)); seg_matched = True
+                        else:
+                            has_support = bool(re.search(r'\bsupport\b', sl))
+                            if has_support: add('Support butée HS', n, eq(sl))
+                            else: add('Butée HS', n, eq(sl))
+                            seg_matched = True
                     if 'bavette' in sl and not_vetuste and not has_bavette_flexible: add('Bavette HS', n); seg_matched = True
                     if 'hublot' in sl and not_vetuste: add('Hublot HS', n); seg_matched = True
                     if 'parachute' in sl and not_vetuste: add('Parachute HS', n); seg_matched = True
@@ -1007,6 +1045,9 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     # Segment non reconnu → bloc dynamique
                     if not seg_matched:
                         label = _condense_summary_label(seg.strip().rstrip('.'))
+                        # Normaliser les parentheses pour eviter les doublons de label
+                        # Ex: 'Condamne (benne)' et 'Condamne benne' -> meme label
+                        label = re.sub(r'\s*\(([^)]+)\)', r' \1', label).strip()
                         if label: add(label, n)
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
@@ -1047,7 +1088,12 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     else:
         story.append(Paragraph(titre_final, ts))
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
-    for lbl in sorted(tcats.keys()): story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
+    # Ordre d'affichage des tendeurs/crochets : E > L > Crochet S > C
+    _TENDEUR_ORDER = ['Tendeur E (extensible)', 'Tendeur L (long)', 'Crochet S', 'Tendeur C (court)']
+    for lbl in _TENDEUR_ORDER:
+        if lbl in tcats: story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
+    for lbl in sorted(tcats.keys()):
+        if lbl not in _TENDEUR_ORDER: story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
     for c,d in cats.items(): story.append(Paragraph(fmt(c,d),ns))
     for note in tech_notes:
         story.append(Paragraph(f"<b>Note technicien :</b> {note}", note_style))
