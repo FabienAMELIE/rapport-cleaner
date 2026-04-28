@@ -3,7 +3,7 @@ Rapport Cleaner — Loading Systems
 Nettoie automatiquement les rapports d'intervention PDF de techniciens.
 """
 
-import os, re, sys, json, threading, tempfile
+import os, re, sys, json, threading, tempfile, urllib.request, urllib.error, subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 # Drag & drop : tkinterdnd2 pour supporter le glisser-déposer de fichiers
@@ -22,7 +22,10 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.2.5"
+VERSION = "V0.3.1"
+GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
+GITHUB_EXE_NAME = "RapportCleaner.exe"
+UPDATER_FLAG = "--updated"
 
 def resource_path(filename):
     """Retourne le chemin absolu vers une ressource (compatible PyInstaller)."""
@@ -1103,6 +1106,51 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     return story
 
 # ── Fenêtre Paramètres ────────────────────────────────────────────────────────
+# ── Système de mise à jour ────────────────────────────────────────────────────
+
+def check_latest_version():
+    """Interroge l'API GitHub et retourne (tag_latest, download_url) ou (None, None) si erreur."""
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req = urllib.request.Request(url, headers={"User-Agent": "RapportCleaner"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        tag = data.get("tag_name", "")
+        for asset in data.get("assets", []):
+            if asset.get("name") == GITHUB_EXE_NAME:
+                return tag, asset["browser_download_url"]
+        return tag, None
+    except Exception:
+        return None, None
+
+def do_update(download_url, log_fn=None):
+    """Télécharge le nouveau .exe, écrit un .bat pour remplacer et relancer, puis quitte."""
+    def log(msg):
+        if log_fn: log_fn(msg)
+    try:
+        exe_path = sys.executable
+        tmp_exe = exe_path + ".new"
+        log("Téléchargement en cours...")
+        urllib.request.urlretrieve(download_url, tmp_exe)
+        log("Téléchargement terminé. Redémarrage...")
+        # Écrire le script de remplacement
+        bat_path = exe_path + "_updater.bat"
+        bat_content = (
+            "@echo off\n"
+            "timeout /t 2 /nobreak >nul\n"
+            f"move /y \"{tmp_exe}\" \"{exe_path}\"\n"
+            f"start \"\" \"{exe_path}\" {UPDATER_FLAG}\n"
+            "del \"%~f0\"\n"
+        )
+        with open(bat_path, 'w') as f:
+            f.write(bat_content)
+        subprocess.Popen([bat_path], shell=True, creationflags=subprocess.CREATE_NO_WINDOW
+                         if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+        sys.exit(0)
+    except Exception as e:
+        log(f"Erreur mise à jour : {e}")
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, cfg, on_save):
         super().__init__(parent)
@@ -1216,6 +1264,30 @@ class SettingsWindow(tk.Toplevel):
         tk.Button(add_f3,text="Tout effacer",command=self._clear_ok,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
+        # ── Onglet 4 — Mises à jour ──────────────────────────────────────────────
+        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  🔄  Mises à jour  ')
+        tk.Label(tab4,text="Vérifier si une nouvelle version de Rapport Cleaner est disponible.",
+                 bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=16,pady=(16,4))
+        tk.Label(tab4,text=f"Version actuelle : {VERSION}",
+                 bg=C_CARD,fg=C_TEXT,font=('Helvetica',9,'bold')).pack(anchor='w',padx=16,pady=(0,12))
+        tk.Frame(tab4,bg=C_BORDER,height=1).pack(fill='x',padx=16,pady=(0,14))
+        self._upd_status=tk.StringVar(value="")
+        self._upd_lbl=tk.Label(tab4,textvariable=self._upd_status,bg=C_CARD,fg=C_TEXT2,
+                               font=('Helvetica',9),wraplength=540,justify='left')
+        self._upd_lbl.pack(anchor='w',padx=16,pady=(0,10))
+        self._upd_btn_dl=tk.Button(tab4,text="⬇  Télécharger et installer",
+                                   command=self._do_update,bg=C_ACCENT,fg='white',
+                                   relief='flat',padx=14,pady=6,cursor='hand2',
+                                   font=('Helvetica',9,'bold'))
+        # Bouton téléchargement masqué par défaut
+        self._upd_download_url=None
+        upd_btn_f=tk.Frame(tab4,bg=C_CARD); upd_btn_f.pack(anchor='w',padx=16)
+        tk.Button(upd_btn_f,text="🔍  Vérifier les mises à jour",command=self._check_update,
+                  bg=C_PANEL,fg=C_TEXT,relief='flat',padx=14,pady=6,cursor='hand2',
+                  font=('Helvetica',9)).pack(side='left',padx=(0,10))
+        self._upd_btn_dl.pack_forget()
+        self._upd_btn_dl_frame=upd_btn_f
+
         # ── Boutons bas ───────────────────────────────────────────────────────
         bot=tk.Frame(self,bg=C_BG); bot.pack(fill='x',padx=12,pady=(0,12))
         tk.Button(bot,text="✓ Enregistrer",command=self._save,bg=C_SUCCESS,fg='white',
@@ -1288,6 +1360,42 @@ class SettingsWindow(tk.Toplevel):
 
     def _clear_ok(self):
         self.cfg['known_ok']=[]; self.ok_list.delete(0,'end')
+
+    def _check_update(self):
+        self._upd_status.set("Vérification en cours...")
+        self._upd_lbl.config(fg=C_TEXT2)
+        self._upd_btn_dl.pack_forget()
+        def worker():
+            tag, url = check_latest_version()
+            if tag is None:
+                self.after(0, lambda: (
+                    self._upd_status.set("Impossible de contacter GitHub. Vérifiez votre connexion."),
+                    self._upd_lbl.config(fg='#e05050')))
+            elif tag == VERSION:
+                self.after(0, lambda: (
+                    self._upd_status.set(f"✓ Vous avez déjà la dernière version ({VERSION})."),
+                    self._upd_lbl.config(fg=C_SUCCESS)))
+            else:
+                self._upd_download_url = url
+                def show_dl(t=tag, u=url):
+                    self._upd_status.set(f"Nouvelle version disponible : {t}\nCliquez sur le bouton pour mettre à jour.")
+                    self._upd_lbl.config(fg=C_ACCENT)
+                    if u:
+                        self._upd_btn_dl.pack(side='left', in_=self._upd_btn_dl_frame)
+                    else:
+                        self._upd_status.set(f"Nouvelle version disponible : {t}\nMais le fichier .exe est introuvable dans la release.")
+                self.after(0, show_dl)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_update(self):
+        if not self._upd_download_url: return
+        self._upd_btn_dl.config(state='disabled')
+        self._upd_status.set("Téléchargement en cours...")
+        self._upd_lbl.config(fg=C_TEXT2)
+        def worker():
+            do_update(self._upd_download_url,
+                      log_fn=lambda m: self.after(0, lambda msg=m: self._upd_status.set(msg)))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _save(self):
         self.cfg['theme']=self.theme_var.get()
@@ -1652,4 +1760,20 @@ class App(_AppBase):
 
 if __name__ == '__main__':
     app = App()
+    if UPDATER_FLAG in sys.argv:
+        # Petite bannière de notification mise à jour
+        def _show_updated_banner():
+            banner = tk.Toplevel(app)
+            banner.overrideredirect(True)
+            banner.configure(bg=C_SUCCESS)
+            banner.attributes('-topmost', True)
+            app.update_idletasks()
+            bw, bh = 320, 44
+            sx = app.winfo_x() + (app.winfo_width() - bw) // 2
+            sy = app.winfo_y() + 60
+            banner.geometry(f"{bw}x{bh}+{sx}+{sy}")
+            tk.Label(banner, text=f"✓  Logiciel mis à jour vers {VERSION} !",
+                     bg=C_SUCCESS, fg='white', font=('Helvetica', 10, 'bold')).pack(expand=True)
+            banner.after(3500, banner.destroy)
+        app.after(600, _show_updated_banner)
     app.mainloop()
