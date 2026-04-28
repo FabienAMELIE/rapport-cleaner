@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.1"
+VERSION = "V0.3.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -928,8 +928,9 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         for ci,f in enumerate(row[2:]):
             if not f: continue
             fl=f.lower(); is_sas=(ci in sas_indices)
-            # Vidange : detection non-exclusive (une meme cellule peut aussi avoir d'autres anomalies)
-            if 'vidange' in fl or 'hydraulique' in fl:
+            # Vidange : detection stricte (vidange explicite OU quantite d'huile mentionnee)
+            # 'hydraulique' seul (ex: reference materiel) ne declenche plus la regle
+            if 'vidange' in fl or re.search(r"\d+\s*l\s*d'huile", fl, re.IGNORECASE):
                 if n not in vns: vns.append(n)
             if is_sas and ('tendeur' in fl or 'crochet' in fl or
                     re.search(r'\b\d+\s*(?:courts?|longs?|extensibles?)\b',fl) or
@@ -1047,10 +1048,28 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
 
                     # Segment non reconnu → bloc dynamique
                     if not seg_matched:
+                        # Point 5 : axe + dimension -> "Axe a remplacer"
+                        if re.search(r'\baxe\b', sl) and re.search(r'\d+[,.]?\d*\s*(?:mm|creux|plein)', sl, re.IGNORECASE):
+                            add('Axe à remplacer', n); seg_matched = True
+                    if not seg_matched:
                         label = _condense_summary_label(seg.strip().rstrip('.'))
                         # Normaliser les parentheses pour eviter les doublons de label
-                        # Ex: 'Condamne (benne)' et 'Condamne benne' -> meme label
                         label = re.sub(r'\s*\(([^)]+)\)', r' \1', label).strip()
+                        # Point 6 : bibliotheque de patterns courts pour segments verbeux
+                        _SHORT_PATTERNS = [
+                            (r'rail\b.{0,30}\bcomplet\b|prévoir\s+rail\s+complet|prevoir\s+rail\s+complet', 'Remplacement rail complet'),
+                            (r'rail\b.{0,30}\b(tordu|détaché|detache|déformé|deforme)', 'Rail HS'),
+                            (r'montant\b.{0,30}\b(tordu|détaché|detache|déformé|deforme)', 'Montant tordu'),
+                            (r'nacelle\s+(requise|nécessaire|necessaire|toucan|toucan|3b|prévoir|prevoir)', 'Nacelle requise'),
+                            (r'pas\s+d.accès\s+nacelle|pas\s+d.acces\s+nacelle|prévoir\s+une\s+nacelle|prevoir\s+une\s+nacelle', 'Nacelle requise'),
+                            (r'besoin\s+d.un\s+chariot|chariot\b.{0,20}\bquai', 'Chariot nécessaire'),
+                            (r'\bgalet[s]?\b.{0,20}\b(long[s]?|remplacer|remplacé|hs)', 'Galets à remplacer'),
+                        ]
+                        if label and len(label) > 40:
+                            for pat, short_lbl in _SHORT_PATTERNS:
+                                if re.search(pat, sl, re.IGNORECASE):
+                                    label = short_lbl
+                                    break
                         if label: add(label, n)
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
@@ -1072,13 +1091,16 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
             page_content_w = landscape(A4)[0] - 20*mm
             logo_col_w = logo_w + 4*mm
             title_col_w = page_content_w - logo_col_w
+            # Table 3 colonnes : spacer | titre centré | logo
+            # Le spacer gauche = logo_col_w => titre parfaitement centré sur la page entière
+            center_col_w = page_content_w - 2 * logo_col_w
             header_table = Table(
-                [[Paragraph(titre_final, ts), logo]],
-                colWidths=[title_col_w, logo_col_w]
+                [['', Paragraph(titre_final, ts), logo]],
+                colWidths=[logo_col_w, center_col_w, logo_col_w]
             )
             header_table.setStyle(TableStyle([
-                ('ALIGN',    (0,0),(0,0), 'CENTER'),
-                ('ALIGN',    (1,0),(1,0), 'RIGHT'),
+                ('ALIGN',    (1,0),(1,0), 'CENTER'),
+                ('ALIGN',    (2,0),(2,0), 'RIGHT'),
                 ('VALIGN',   (0,0),(-1,-1), 'MIDDLE'),
                 ('LEFTPADDING',  (0,0),(-1,-1), 0),
                 ('RIGHTPADDING', (0,0),(-1,-1), 0),
@@ -1097,7 +1119,12 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         if lbl in tcats: story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
     for lbl in sorted(tcats.keys()):
         if lbl not in _TENDEUR_ORDER: story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
-    for c,d in cats.items(): story.append(Paragraph(fmt(c,d),ns))
+    # Afficher les panneaux consécutivement (PB -> PI -> PH) puis le reste des cats
+    _PANNEAU_ORDER = ['Panneau bas', 'Panneau intermédiaire', 'Panneau haut', 'Joint']
+    for lbl in _PANNEAU_ORDER:
+        if lbl in cats: story.append(Paragraph(fmt(lbl,cats[lbl]),ns))
+    for c,d in cats.items():
+        if c not in _PANNEAU_ORDER: story.append(Paragraph(fmt(c,d),ns))
     for note in tech_notes:
         story.append(Paragraph(f"<b>Note technicien :</b> {note}", note_style))
     story.append(Spacer(1,6))
@@ -1265,7 +1292,7 @@ class SettingsWindow(tk.Toplevel):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
         # ── Onglet 4 — Mises à jour ──────────────────────────────────────────────
-        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  🔄  Mises à jour  ')
+        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  Mises à jour  ')
         tk.Label(tab4,text="Vérifier si une nouvelle version de Rapport Cleaner est disponible.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=16,pady=(16,4))
         tk.Label(tab4,text=f"Version actuelle : {VERSION}",
@@ -1275,16 +1302,16 @@ class SettingsWindow(tk.Toplevel):
         self._upd_lbl=tk.Label(tab4,textvariable=self._upd_status,bg=C_CARD,fg=C_TEXT2,
                                font=('Helvetica',9),wraplength=540,justify='left')
         self._upd_lbl.pack(anchor='w',padx=16,pady=(0,10))
-        self._upd_btn_dl=tk.Button(tab4,text="⬇  Télécharger et installer",
+        self._upd_btn_dl=tk.Button(tab4,text="Télécharger et installer",
                                    command=self._do_update,bg=C_ACCENT,fg='white',
-                                   relief='flat',padx=14,pady=6,cursor='hand2',
-                                   font=('Helvetica',9,'bold'))
+                                   relief='flat',padx=18,pady=8,cursor='hand2',
+                                   font=('Helvetica',10,'bold'))
         # Bouton téléchargement masqué par défaut
         self._upd_download_url=None
         upd_btn_f=tk.Frame(tab4,bg=C_CARD); upd_btn_f.pack(anchor='w',padx=16)
-        tk.Button(upd_btn_f,text="🔍  Vérifier les mises à jour",command=self._check_update,
-                  bg=C_PANEL,fg=C_TEXT,relief='flat',padx=14,pady=6,cursor='hand2',
-                  font=('Helvetica',9)).pack(side='left',padx=(0,10))
+        tk.Button(upd_btn_f,text="Vérifier les mises à jour",command=self._check_update,
+                  bg=C_PANEL,fg=C_TEXT,relief='flat',padx=18,pady=8,cursor='hand2',
+                  font=('Helvetica',10,'bold')).pack(side='left',padx=(0,10))
         self._upd_btn_dl.pack_forget()
         self._upd_btn_dl_frame=upd_btn_f
 
