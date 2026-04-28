@@ -21,6 +21,8 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                  Paragraph, Spacer, Image as RLImage)
 from reportlab.lib.units import mm
 
+VERSION = "V0.2.4"
+
 def resource_path(filename):
     """Retourne le chemin absolu vers une ressource (compatible PyInstaller)."""
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -123,18 +125,40 @@ def fix_word_breaks(text):
         line = lines[i]
         if i+1 < len(lines):
             nxt = lines[i+1].strip()
+            # Cas 1 : ligne suivante entiere = suffixe court alpha (comportement original)
             if re.fullmatch(r'[a-zA-ZÀ-ÿ]{1,4}', nxt) and nxt.lower() not in NEVER_SUFFIX:
                 m = re.search(r'[a-zA-ZÀ-ÿ]+$', line.rstrip())
                 if m:
                     lw = m.group()
                     ends_c = bool(re.search(r'[^aeiouàâéèêëîïôùûüyAEIOUÀÂÉÈÊËÎÏÔÙÛÜY]$', lw))
-                    # Ne pas fusionner si le suffixe est une seule lettre consonne isolée
-                    # sauf si elle forme clairement une terminaison (ex: "s", "x" pluriels)
-                    # Ex: "Rebranchemen" + "t" → ne pas fusionner (résidu de coupure PDF)
                     if len(nxt) == 1 and nxt.lower() not in {'s','x','e','é'}:
                         result.append(line); i+=1; continue
                     if (ends_c or len(lw)<=11) and len(lw+nxt)>=5:
                         result.append(line.rstrip()[:m.start()]+lw+nxt); i+=2; continue
+            else:
+                # Cas 2 : prefixe alpha court suivi d'autre chose sur la ligne suivante
+                # Ex: "maintenan\nce/ cellule..." -> "maintenance / cellule..."
+                # Ex: "asservissem\nent hs" -> "asservissement hs"
+                # Ex: "Sectionneur\nr hs" -> "Sectionneur hs" (doublon de lettre)
+                pfx_m = re.match(r'^([a-zA-ZÀ-ÿ]{1,4})([^a-zA-ZÀ-ÿ].*)?$', nxt)
+                if pfx_m:
+                    pfx = pfx_m.group(1)
+                    rest = (pfx_m.group(2) or '').lstrip()
+                    m = re.search(r'[a-zA-ZÀ-ÿ]+$', line.rstrip())
+                    if m:
+                        lw = m.group()
+                        ends_c = bool(re.search(r'[^aeiouàâéèêëîïôùûüyAEIOUÀÂÉÈÊËÎÏÔÙÛÜY]$', lw))
+                        # Doublon de lettre : "Sectionneur\nr hs" -> supprimer le 'r' residuel
+                        if len(pfx) == 1 and lw.lower().endswith(pfx.lower()):
+                            lines[i+1] = rest
+                            result.append(line.rstrip()); i+=1; continue
+                        # Suffixe non-isole : fusionner le prefixe, reinjecter le reste
+                        if pfx.lower() not in NEVER_SUFFIX:
+                            if len(pfx) == 1 and pfx.lower() not in {'s','x','e','é'}:
+                                result.append(line); i+=1; continue
+                            if (ends_c or len(lw)<=11) and len(lw+pfx)>=5:
+                                lines[i+1] = rest
+                                result.append(line.rstrip()[:m.start()]+lw+pfx); i+=1; continue
         result.append(line); i+=1
     return re.sub(r' {2,}', ' ', ' '.join(result)).strip()
 
@@ -682,7 +706,7 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
                 serie = row[0].strip()
                 nom = fix_word_breaks(row[1]) if row[1] else ''
                 com = clean_cell(fix_word_breaks(row[2]) if row[2] else '', corrections, blacklist)
-                if re.search(r'porte sectionnelle', nom, re.IGNORECASE):
+                if re.search(r'porte\s+section', nom, re.IGNORECASE):
                     m = re.search(r'(?:abloy|assa)\s+(\d+)', nom, re.IGNORECASE) or re.search(r'(\d+)\s*$', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['porte']=(serie,com)
                 elif re.search(r'niveleur', nom, re.IGNORECASE):
@@ -794,6 +818,9 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
+    ver_style = ParagraphStyle('ver', fontSize=7, textColor=colors.HexColor('#aaaaaa'), alignment=2)
+    story.append(Spacer(1, 4*mm))
+    story.append(Paragraph(f"Rapport Cleaner {VERSION}", ver_style))
     doc = SimpleDocTemplate(output_path, pagesize=landscape(A4),
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     doc.build(story)
@@ -1330,7 +1357,7 @@ class App(_AppBase):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
                   font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
         # Version en bas à droite
-        tk.Label(bf,text="V0.2.3",font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
+        tk.Label(bf,text=VERSION,font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
 
     def _section(self, label):
         f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
