@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.2.1"
+VERSION = "V0.3.3"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -966,7 +966,39 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 # Traitement segment par segment : chaque segment est testé contre les règles connues
                 # Les segments non reconnus tombent dans le bloc dynamique
                 # Cela évite que matched=True global fasse perdre des segments non reconnus
-                segments_full = [s.strip() for s in re.split(r'\s*[+/&,\\]\s*', f.strip()) if s.strip()]
+                # Pre-decoupage : split sur separateurs classiques (+, /, &, ,)
+                _raw_segs = [s.strip() for s in re.split(r'\s*[+/&,\\]\s*', f.strip()) if s.strip()]
+
+                # Pre-decoupage intelligent (V0.3.3) : sur segments longs (>60 chars) sans separateur,
+                # detecter les frontieres entre anomalies via mots-cles connus.
+                # Deux passes : (1) apres ponctuation / apres HS / avant N+kw (case-insensitive)
+                #               (2) avant mot-cle capitalise mid-phrase (case-sensitive)
+                _SKW = [
+                    'verrou','poignée','poignee','suspente','câble','cable',
+                    'flexible','roulette','hublot','bavette','parachute',
+                    'butée','butee','rail','montant','support','galet',
+                    'corde','soudure','charnière','charniere','cellule',
+                    'carte','moteur','spot','luminaire','barre','panneau',
+                ]
+                _skw = '|'.join(_SKW)
+                _PAT1 = (r'(?<=[.!?])\s+'
+                         r'|(?<=hs)\s+(?=(?:' + _skw + r'))'
+                         r'|\s+(?=\d+\s+(?:' + _skw + r'))')
+                _PAT2 = r'(?<=[a-zà-ÿ\d])\s+(?=(?:' + '|'.join(w[0].upper()+w[1:] for w in _SKW) + r'))'
+                segments_full = []
+                for raw_seg in _raw_segs:
+                    if len(raw_seg) > 60 and not re.search(r'[+/&,\\]', raw_seg):
+                        p1 = [s.strip() for s in re.split(_PAT1, raw_seg, flags=re.IGNORECASE) if s.strip()]
+                        sub = []
+                        for seg1 in p1:
+                            if len(seg1) > 40:
+                                sub.extend([s.strip() for s in re.split(_PAT2, seg1) if s.strip()])
+                            else:
+                                sub.append(seg1)
+                        segments_full.extend(sub)
+                    else:
+                        segments_full.append(raw_seg)
+
                 has_bavette_flexible = False
 
                 # Passe 1 : détecter has_bavette_flexible sur la cellule entière (nécessaire pour éviter doublon bavette)
@@ -1292,7 +1324,7 @@ class SettingsWindow(tk.Toplevel):
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=10,pady=4,cursor='hand2').pack(side='left')
 
         # ── Onglet 4 — Mises à jour ──────────────────────────────────────────────
-        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  Mises à jour  ')
+        tab4=tk.Frame(nb,bg=C_CARD); nb.add(tab4,text='  🔄  Mises à jour  ')
         tk.Label(tab4,text="Vérifier si une nouvelle version de Rapport Cleaner est disponible.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8)).pack(anchor='w',padx=16,pady=(16,4))
         tk.Label(tab4,text=f"Version actuelle : {VERSION}",
