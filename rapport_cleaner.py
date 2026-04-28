@@ -160,7 +160,20 @@ def fix_word_breaks(text):
                                 lines[i+1] = rest
                                 result.append(line.rstrip()[:m.start()]+lw+pfx); i+=1; continue
         result.append(line); i+=1
-    return re.sub(r' {2,}', ' ', ' '.join(result)).strip()
+    joined = re.sub(r' {2,}', ' ', ' '.join(result)).strip()
+    # Post-processing : supprimer les fragments residuels (artefacts PDF 3 lignes)
+    # Ex: 'asservissement ement hs' -> 'asservissement hs'  ('ement' = fin de 'asservissement')
+    # Ex: 'remplacement ent /'     -> 'remplacement /'
+    # Ex: 'sectionneur r hs'       -> 'sectionneur hs'      ('r' = doublon)
+    # Exclusions : mots courts legitimes du francais (NEVER_SUFFIX) + 'ce','se','me','te','ne'
+    _RESIDUAL_EXCL = NEVER_SUFFIX | {'ce', 'se', 'me', 'te', 'ne', 'que', 'elle', 'ment'}
+    def _drop_residual(m):
+        word, frag = m.group(1), m.group(2)
+        if word.lower().endswith(frag.lower()) and frag.lower() not in _RESIDUAL_EXCL:
+            return word
+        return m.group(0)
+    joined = re.sub(r'([a-zA-ZÀ-ÿ]{5,}) ([a-zA-ZÀ-ÿ]{1,5})\b', _drop_residual, joined)
+    return joined
 
 def strip_choc(text):
     if not text: return text
@@ -818,12 +831,17 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
     main_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     main_table.setStyle(TableStyle(style_cmds))
     story.append(main_table)
-    ver_style = ParagraphStyle('ver', fontSize=7, textColor=colors.HexColor('#aaaaaa'), alignment=2)
-    story.append(Spacer(1, 4*mm))
-    story.append(Paragraph(f"Rapport Cleaner {VERSION}", ver_style))
+
+    def _draw_version(canvas, doc):
+        canvas.saveState()
+        canvas.setFont('Helvetica', 7)
+        canvas.setFillColor(colors.HexColor('#aaaaaa'))
+        canvas.drawRightString(landscape(A4)[0] - 10*mm, 5*mm, VERSION)
+        canvas.restoreState()
+
     doc = SimpleDocTemplate(output_path, pagesize=landscape(A4),
         leftMargin=10*mm, rightMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
-    doc.build(story)
+    doc.build(story, onFirstPage=_draw_version, onLaterPages=_draw_version)
 
 def _condense_summary_label(text):
     """Condense les textes avec dimensions pour le résumé.
