@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.3.4"
+VERSION = "V0.3.3.5"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -1189,26 +1189,38 @@ def do_update(download_url, log_fn=None):
     try:
         import tempfile
         exe_path = sys.executable
-        pid = os.getpid()
-        tmp_dir = tempfile.gettempdir()
-        tmp_exe = os.path.join(tmp_dir, "RapportCleaner_update.exe")
+        exe_dir  = os.path.dirname(os.path.abspath(exe_path))
+        pid      = os.getpid()
+        mei_path = getattr(sys, '_MEIPASS', None)
+        tmp_dir  = tempfile.gettempdir()
+        tmp_exe  = os.path.join(tmp_dir, "RapportCleaner_update.exe")
         bat_path = os.path.join(tmp_dir, "rc_updater.bat")
 
         log("Téléchargement en cours...")
         urllib.request.urlretrieve(download_url, tmp_exe)
         log("Téléchargement terminé. Fermeture et redémarrage...")
 
-        # Le .bat : tue le process courant par PID, attend, remplace, relance, se supprime
-        bat_content = (
-            "@echo off\n"
-            f"taskkill /f /pid {pid} >nul 2>&1\n"
-            "timeout /t 2 /nobreak >nul\n"
-            f"move /y \"{tmp_exe}\" \"{exe_path}\"\n"
-            f"start \"\" \"{exe_path}\" {UPDATER_FLAG}\n"
-            "del \"%~f0\"\n"
-        )
+        # Le .bat : tue le process, supprime l'ancien dossier _MEI (PyInstaller),
+        # remplace l'exe, relance depuis son répertoire, se supprime.
+        bat_lines = [
+            "@echo off",
+            f"taskkill /f /pid {pid} >nul 2>&1",
+            "timeout /t 3 /nobreak >nul",
+        ]
+        if mei_path:
+            # Supprimer l'ancien dossier _MEI AVANT de lancer le nouveau exe.
+            # Sans ça, PyInstaller tente de le réutiliser (même hash binaire) et plante
+            # si python312.dll a déjà été libéré/supprimé par Windows.
+            bat_lines.append(f"rmdir /s /q \"{mei_path}\" >nul 2>&1")
+            bat_lines.append("timeout /t 1 /nobreak >nul")
+        bat_lines += [
+            f"move /y \"{tmp_exe}\" \"{exe_path}\"",
+            f"start \"\" /d \"{exe_dir}\" \"{exe_path}\" {UPDATER_FLAG}",
+            "del \"%~f0\"",
+        ]
+
         with open(bat_path, 'w') as f:
-            f.write(bat_content)
+            f.write('\n'.join(bat_lines) + '\n')
 
         flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
         subprocess.Popen([bat_path], shell=True, creationflags=flags)
