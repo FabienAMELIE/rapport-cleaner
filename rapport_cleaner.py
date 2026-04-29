@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.3.5"
+VERSION = "V0.3.4"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -281,6 +281,8 @@ _FUSED_PATTERNS = [
     (r'\b(verin|vérin)(bavette|principal|lèvre|levre)\b', lambda m: m.group(1) + ' ' + m.group(2)),
     # choc + panneau colles sans espace : ChocPB -> Choc PB
     (r'\bchoc(pb|pi|ph)\b', lambda m: 'Choc ' + m.group(1).upper()),
+    # bâche + supérieur/e fusionnés (ex: "Bachesupérieur hs")
+    (r'\bbaches?(sup[eé]rieure?)\b', lambda m: 'Bâche ' + m.group(1)),
     # absence + de
     (r'\babsencede\b', 'absence de'),
     # cellule + d
@@ -323,7 +325,26 @@ def clean_cell(text, corrections=None, blacklist=None):
     if corrections: t = apply_corrections(t, corrections)
     t = strip_choc(t)                              # passe 2 : après corrections
     t = _propagate_hs(t)                           # propagation HS au dernier segment
-    t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+effectué\b', '', t, flags=re.IGNORECASE)
+
+    # ── Filtre "effectué" ──────────────────────────────────────────────────────
+    # Regex tolérant aux fautes : effectué/effectue/éffectué/efectue...
+    _EFF_RE = re.compile(r'[eé]ff?ectu[eé]e?', re.IGNORECASE)
+    _SEP_RE = re.compile(r'\s*/\s*|\s*\+\s*')
+    if _EFF_RE.search(t):
+        segs = _SEP_RE.split(t)
+        if len(segs) > 1:
+            # Avec séparateur : drop les segments contenant "effectué",
+            # garder les autres (soumis aux règles normales)
+            kept = [s.strip() for s in segs if not _EFF_RE.search(s)]
+            t = ' / '.join(kept)
+        else:
+            # Sans séparateur : conservatif
+            # effectué sans HS → drop ; effectué + HS → garde tout
+            if not re.search(r'\bHS\b', t, re.IGNORECASE):
+                t = ''
+            # sinon : garde tout tel quel
+    # Cleanup résiduel "remplacement effectué" (cas HS conservé sans séparateur)
+    t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+[eé]ff?ectu[eé]e?\b', '', t, flags=re.IGNORECASE)
     t = re.sub(r'^[\s/\-,;.]+','',t); t = re.sub(r'[\s/\-,;.]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
     bl = blacklist or []
@@ -736,13 +757,20 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
                 nom = fix_word_breaks(row[1]) if row[1] else ''
                 com = clean_cell(fix_word_breaks(row[2]) if row[2] else '', corrections, blacklist)
                 if re.search(r'porte\s+section', nom, re.IGNORECASE):
-                    m = re.search(r'(?:abloy|assa)\s+(\d+)', nom, re.IGNORECASE) or re.search(r'(\d+)\s*$', nom)
+                    # Cherche le N° de quai : fin du nom ("horman 2"), début ("24 porte..."), ou abloy/assa
+                    m = re.search(r'(?:abloy|assa)\s+(\d+)', nom, re.IGNORECASE) or \
+                        re.search(r'(\d+)\s*$', nom) or \
+                        re.search(r'^(\d+)\b', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['porte']=(serie,com)
                 elif re.search(r'niveleur', nom, re.IGNORECASE):
-                    m = re.search(r':\s*(\d+)', nom) or re.search(r'(\d+)\s*$', nom)
+                    # ^(\d+) évite de matcher le modèle en fin ("2 Niveleur 232" → 2, pas 232)
+                    m = re.search(r':\s*(\d+)', nom) or \
+                        re.search(r'^(\d+)\b', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['niv']=(serie,com)
                 elif re.search(r'\bsas\b', nom, re.IGNORECASE):
-                    m = re.search(r'(?:abloy)\s+(\d+)', nom, re.IGNORECASE) or re.search(r'(\d+)\s*$', nom)
+                    # ^(\d+) évite de matcher les dims en fin ("2 Sas 403 ... bande jaune" → 2)
+                    m = re.search(r'(?:abloy)\s+(\d+)', nom, re.IGNORECASE) or \
+                        re.search(r'^(\d+)\b', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['sas']=(serie,com)
     rows_data = []
     for qn in sorted(quais.keys()):
@@ -1266,10 +1294,18 @@ class SettingsWindow(tk.Toplevel):
         theme_f=tk.Frame(tab0,bg=C_CARD); theme_f.pack(fill='x',padx=16,pady=(0,8))
         tk.Label(theme_f,text="Mode d'affichage :",bg=C_CARD,fg=C_TEXT,font=('Helvetica',9),width=20,anchor='w').pack(side='left')
         self.theme_var=tk.StringVar(value=self.cfg.get('theme','clair'))
-        for val,lbl in [('clair','☀  Mode clair'),('sombre','🌙  Mode sombre')]:
-            tk.Radiobutton(theme_f,text=lbl,variable=self.theme_var,value=val,
-                           bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
-                           activebackground=C_CARD,font=('Helvetica',9),padx=12).pack(side='left',padx=4)
+        # Mode clair : icône ☀ alignée nativement
+        tk.Radiobutton(theme_f,text='☀  Mode clair',variable=self.theme_var,value='clair',
+                       bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
+                       activebackground=C_CARD,font=('Helvetica',9),padx=12).pack(side='left',padx=4)
+        # Mode sombre : icône ☾ via Label séparé pour garantir l'alignement vertical
+        rb_sombre_f=tk.Frame(theme_f,bg=C_CARD)
+        rb_sombre_f.pack(side='left',padx=4)
+        tk.Radiobutton(rb_sombre_f,text='  Mode sombre',variable=self.theme_var,value='sombre',
+                       bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
+                       activebackground=C_CARD,font=('Helvetica',9),padx=0).pack(side='right')
+        tk.Label(rb_sombre_f,text='☾',bg=C_CARD,fg=C_TEXT,
+                 font=('Helvetica',9),pady=0).pack(side='left')
         tk.Label(tab0,text="Le changement de thème sera appliqué au prochain démarrage de l'application.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),wraplength=580).pack(anchor='w',padx=16,pady=(8,0))
 
@@ -1470,11 +1506,34 @@ class SettingsWindow(tk.Toplevel):
     def _do_update(self):
         if not self._upd_download_url: return
         self._upd_btn_dl.config(state='disabled')
-        self._upd_status.set("Téléchargement en cours...")
-        self._upd_lbl.config(fg=C_TEXT2)
+
+        # ── Fenêtre de progression modale ────────────────────────────────────
+        prog_win = tk.Toplevel(self)
+        prog_win.title("Mise à jour")
+        prog_win.configure(bg=C_BG)
+        prog_win.resizable(False, False)
+        prog_win.grab_set()
+        prog_win.attributes('-topmost', True)
+        prog_win.protocol("WM_DELETE_WINDOW", lambda: None)  # empêche la fermeture manuelle
+        pw, ph = 380, 110
+        self.update_idletasks()
+        sx = self.winfo_x() + (self.winfo_width()  - pw) // 2
+        sy = self.winfo_y() + (self.winfo_height() - ph) // 2
+        prog_win.geometry(f"{pw}x{ph}+{sx}+{sy}")
+
+        prog_lbl = tk.Label(prog_win, text="Téléchargement en cours...",
+                            bg=C_BG, fg=C_TEXT, font=('Helvetica', 9))
+        prog_lbl.pack(pady=(18, 6))
+        prog_bar = ttk.Progressbar(prog_win, mode='indeterminate', length=320)
+        prog_bar.pack(pady=(0, 14))
+        prog_bar.start(12)
+
+        def _set_msg(msg):
+            prog_lbl.config(text=msg)
+
         def worker():
             do_update(self._upd_download_url,
-                      log_fn=lambda m: self.after(0, lambda msg=m: self._upd_status.set(msg)))
+                      log_fn=lambda m: self.after(0, lambda msg=m: _set_msg(msg)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _save(self):
@@ -1730,7 +1789,7 @@ class App(_AppBase):
 
         tk.Label(win,text=f"  {len(unknowns)} mot(s) inhabituel(s) trouvé(s). Que faire ?",
                  font=('Helvetica',10,'bold'),bg=C_BG,fg=C_TEXT,pady=10).pack(anchor='w',padx=12)
-        tk.Label(win,text="  ✓ Garder = conserver tel quel   |   ✏ Corriger = remplacer par un autre texte   |   ✗ Supprimer = retirer du PDF",
+        tk.Label(win,text="  ✓ Garder = conserver tel quel   |   → Corriger = remplacer par un autre texte   |   ✗ Supprimer = retirer du PDF",
                  font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(anchor='w',padx=12,pady=(0,8))
 
         frame=tk.Frame(win,bg=C_BG); frame.pack(fill='both',expand=True,padx=12)
@@ -1743,12 +1802,22 @@ class App(_AppBase):
         decisions={}
         for word in sorted(unknowns):
             locs = unknowns[word]  # set de N° d'équipement
-            loc_text = f" (N° {', '.join(sorted(locs))})" if locs else ""
+            # Tri numérique des N° (évite '10' < '2' en tri string)
+            def _n_sort_key(x):
+                m = re.match(r'^(\d+)', x.strip())
+                return (int(m.group(1)), x) if m else (99999, x)
+            locs_sorted = sorted(locs, key=_n_sort_key)
+            # Troncature à 6 N° pour éviter les labels démesurés
+            MAX_LOCS = 6
+            if len(locs_sorted) > MAX_LOCS:
+                loc_text = f" (N° {', '.join(locs_sorted[:MAX_LOCS])}…)"
+            else:
+                loc_text = f" (N° {', '.join(locs_sorted)})" if locs_sorted else ""
             rf=tk.Frame(inner,bg=C_CARD,pady=8); rf.pack(fill='x',pady=2,padx=4)
 
-            # Mot + localisation
+            # Mot + localisation (pas de width fixe pour ne pas tronquer)
             tk.Label(rf,text=f"  «{word}»{loc_text}",font=('Courier',9,'bold'),
-                     bg=C_CARD,fg=C_TEXT,width=35,anchor='w').pack(side='left')
+                     bg=C_CARD,fg=C_TEXT,anchor='w').pack(side='left')
 
             action=tk.StringVar(value='ok')
             correction=tk.StringVar(value='')
@@ -1768,7 +1837,7 @@ class App(_AppBase):
                 else:
                     cf.pack_forget()
 
-            for val,lbl in [('ok','✓ Garder'),('correction','✏ Corriger'),('blacklist','✗ Supprimer')]:
+            for val,lbl in [('ok','✓ Garder'),('correction','→ Corriger'),('blacklist','✗ Supprimer')]:
                 tk.Radiobutton(rf,text=lbl,variable=action,value=val,
                                bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
                                activebackground=C_CARD,font=('Helvetica',8),
