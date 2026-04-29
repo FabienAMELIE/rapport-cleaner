@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.4"
+VERSION = "V0.3.4.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -944,7 +944,16 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         m2 = re.search(r'[xX*×]\s*(\d+)\s*$', s)
         return int(m2.group(1)) if m2 else 1
     cats={}; tcats={}; vns=[]
-    def add(c,n,q=1): cats.setdefault(c,{}); cats[c][n]=cats[c].get(n,0)+q
+    _label_canon = {}  # normalized_key -> canonical display label
+    def _norm_label(lbl):
+        import unicodedata
+        nfd = unicodedata.normalize('NFD', lbl.lower())
+        return ''.join(c for c in nfd if not unicodedata.combining(c))
+    def add(c,n,q=1):
+        nk = _norm_label(c)
+        if nk not in _label_canon: _label_canon[nk] = c
+        can = _label_canon[nk]
+        cats.setdefault(can,{}); cats[can][n]=cats[can].get(n,0)+q
     def addt(l,n,q=1): tcats.setdefault(l,{}); tcats[l][n]=tcats[l].get(n,0)+q
     # Détection colonne SAS par son label (robuste aux noms variés : "SAS", "Sas d'étanchéité", etc.)
     sas_indices = set()
@@ -1088,7 +1097,12 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                             if has_support: add('Support butée HS', n, eq(sl))
                             else: add('Butée HS', n, eq(sl))
                             seg_matched = True
-                    if 'bavette' in sl and not_vetuste and not has_bavette_flexible: add('Bavette HS', n); seg_matched = True
+                    if 'bavette' in sl and not_vetuste and not has_bavette_flexible:
+                        if re.search(r'\btordu[e]?\b|d[eé]form[eé][e]?', sl):
+                            add('Bavette tordue', n)
+                        else:
+                            add('Bavette HS', n)
+                        seg_matched = True
                     if 'hublot' in sl and not_vetuste: add('Hublot HS', n); seg_matched = True
                     if 'parachute' in sl and not_vetuste: add('Parachute HS', n); seg_matched = True
                     if 'moteur' in sl and not_vetuste: add('Moteur HS', n); seg_matched = True
@@ -1106,6 +1120,9 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         no_action = any(x in sl for x in ['a fixer','a refixer','stock client','remplacement effectué'])
                         if not no_action: add('Corde HS', n); seg_matched = True
 
+                    # Segments vétuste : jamais dans le résumé
+                    if not seg_matched and ('vétuste' in sl or 'vetuste' in sl):
+                        seg_matched = True  # supprime du résumé
                     # Segment non reconnu → bloc dynamique
                     if not seg_matched:
                         # Point 5 : axe + dimension -> "Axe a remplacer"
@@ -1237,10 +1254,15 @@ def do_update(download_url, log_fn=None):
         ]
         if mei_path:
             # Supprimer l'ancien dossier _MEI AVANT de lancer le nouveau exe.
-            # Sans ça, PyInstaller tente de le réutiliser (même hash binaire) et plante
-            # si python312.dll a déjà été libéré/supprimé par Windows.
-            bat_lines.append(f"rmdir /s /q \"{mei_path}\" >nul 2>&1")
-            bat_lines.append("timeout /t 1 /nobreak >nul")
+            # Boucle retry : attend que Windows libère tous les handles (DLLs) avant de continuer.
+            bat_lines += [
+                f":retry_rmdir",
+                f"rmdir /s /q \"{mei_path}\" >nul 2>&1",
+                f"if exist \"{mei_path}\" (",
+                "    timeout /t 1 /nobreak >nul",
+                "    goto retry_rmdir",
+                ")",
+            ]
         bat_lines += [
             f"move /y \"{tmp_exe}\" \"{exe_path}\"",
             f"start \"\" /d \"{exe_dir}\" \"{exe_path}\" {UPDATER_FLAG}",
@@ -1260,7 +1282,7 @@ def do_update(download_url, log_fn=None):
 
 
 class SettingsWindow(tk.Toplevel):
-    def __init__(self, parent, cfg, on_save):
+    def __init__(self, parent, cfg, on_save, open_tab=0):
         super().__init__(parent)
         self.title("Paramètres — Rapport Cleaner")
         self.configure(bg=C_BG)
@@ -1269,7 +1291,9 @@ class SettingsWindow(tk.Toplevel):
         self.grab_set()
         self.cfg = cfg
         self.on_save = on_save
+        self._open_tab = open_tab
         self._build()
+        if self._open_tab: self._nb.select(self._open_tab)
         self._center(parent)
 
     def _center(self, parent):
@@ -1286,6 +1310,7 @@ class SettingsWindow(tk.Toplevel):
         s.map('S.TNotebook.Tab',background=[('selected',C_CARD)],foreground=[('selected',C_TEXT)])
         nb=ttk.Notebook(self,style='S.TNotebook')
         nb.pack(fill='both',expand=True,padx=12,pady=12)
+        self._nb = nb
 
         # ── Onglet 0 — Options générales ─────────────────────────────────────
         tab0=tk.Frame(nb,bg=C_CARD); nb.add(tab0,text='  Options générales  ')
@@ -1667,8 +1692,44 @@ class App(_AppBase):
         tk.Button(bf,text="Effacer le journal",command=self._clear_log,
                   bg=C_PANEL,fg=C_TEXT2,relief='flat',padx=12,pady=10,
                   font=('Helvetica',9),cursor='hand2').pack(side='left',padx=10)
-        # Version en bas à droite
-        tk.Label(bf,text=VERSION,font=('Helvetica',8),bg=C_BG,fg=C_TEXT2).pack(side='right',pady=(6,0))
+        # Version + bannière MAJ disponible (en bas à droite)
+        self._version_lbl = tk.Label(bf,text=VERSION,font=('Helvetica',8),bg=C_BG,fg=C_TEXT2,cursor='arrow')
+        self._version_lbl.pack(side='right',pady=(6,0))
+        # Vérification silencieuse au démarrage (après 2s pour laisser l'UI se charger)
+        self.after(2000, self._startup_update_check)
+
+    def _startup_update_check(self):
+        """Vérification silencieuse de mise à jour au démarrage. Si nouvelle version → bannière cliquable."""
+        def worker():
+            try:
+                url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+                req = urllib.request.Request(url, headers={'User-Agent': 'RapportCleaner'})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read())
+                tag = data.get('tag_name', '')
+                assets = data.get('assets', [])
+                dl_url = next((a['browser_download_url'] for a in assets
+                               if a['name'].lower().endswith('.exe')), None)
+                if tag and tag != VERSION and dl_url:
+                    self.after(0, lambda t=tag, u=dl_url: self._show_update_banner(t, u))
+            except: pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_banner(self, new_tag, dl_url):
+        """Affiche une bannière discrète non-modale en bas à droite si une MAJ est disponible."""
+        self._update_banner_url = dl_url
+        self._version_lbl.config(
+            text=f"↑ {new_tag} disponible",
+            fg=C_ACCENT, cursor='hand2',
+            font=('Helvetica', 8, 'underline'))
+        self._version_lbl.bind('<Button-1>', lambda e: self._open_settings_update_tab())
+
+    def _open_settings_update_tab(self):
+        """Ouvre la fenêtre Paramètres directement sur l'onglet Mises à jour."""
+        win = SettingsWindow(self, self.cfg,
+                             on_save=lambda: self._log("✓ Paramètres sauvegardés"),
+                             open_tab=4)
+        win.focus_force()
 
     def _section(self, label):
         f=tk.Frame(self,bg=C_BG); f.pack(fill='x',padx=20,pady=(8,4))
