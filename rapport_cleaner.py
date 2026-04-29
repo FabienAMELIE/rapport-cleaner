@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.4.1"
+VERSION = "V0.3.4.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -83,7 +83,7 @@ DEFAULT_BLACKLIST = [
     'sécurité ok', 'securite ok', 'condamné', 'condamne',
     'occupé par camion en permanence', 'vétuste', 'vetuste',
     'bavette supérieur vétuste', 'bavette superieur vetuste',
-    'compacteur',
+    'compacteur', 'benne',
 ]
 
 DEFAULT_CORRECTIONS = {
@@ -159,7 +159,12 @@ def fix_word_breaks(text):
                         # Suffixe non-isole : fusionner le prefixe, reinjecter le reste
                         if pfx.lower() not in NEVER_SUFFIX:
                             if len(pfx) == 1 and pfx.lower() not in {'s','x','e','é'}:
-                                result.append(line); i+=1; continue
+                                # Exception : "r" après voyelle finale reconstruit -eur/-ier/-oir
+                                # Ex: "supérieu" + "r" → "supérieur"
+                                if pfx.lower() == 'r' and re.search(r'[aeouiéèêàùûî]$', lw, re.IGNORECASE):
+                                    pass  # autorise la fusion
+                                else:
+                                    result.append(line); i+=1; continue
                             if (ends_c or len(lw)<=11) and len(lw+pfx)>=5:
                                 lines[i+1] = rest
                                 result.append(line.rstrip()[:m.start()]+lw+pfx); i+=1; continue
@@ -281,6 +286,10 @@ _FUSED_PATTERNS = [
     (r'\b(verin|vérin)(bavette|principal|lèvre|levre)\b', lambda m: m.group(1) + ' ' + m.group(2)),
     # choc + panneau colles sans espace : ChocPB -> Choc PB
     (r'\bchoc(pb|pi|ph)\b', lambda m: 'Choc ' + m.group(1).upper()),
+    # chiffre collé à tendeur(s) (ex: "2tendeurlong" → "2 tendeur long")
+    (r'(\d)(tendeurs?)', lambda m: m.group(1) + ' ' + m.group(2)),
+    # tendeur(s) collé à un mot suivant (ex: "tendeurcourt" → "tendeur court")
+    (r'(tendeurs?)([a-zA-ZÀ-ÿ])', lambda m: m.group(1) + ' ' + m.group(2)),
     # bâche + supérieur/e fusionnés (ex: "Bachesupérieur hs")
     (r'\bbaches?(sup[eé]rieure?)\b', lambda m: 'Bâche ' + m.group(1)),
     # absence + de
@@ -343,10 +352,21 @@ def clean_cell(text, corrections=None, blacklist=None):
             if not re.search(r'\bHS\b', t, re.IGNORECASE):
                 t = ''
             # sinon : garde tout tel quel
-    # Cleanup résiduel "remplacement effectué" (cas HS conservé sans séparateur)
-    t = re.sub(r'\s*/?\s*(?:fuite\s+)?remplacement\s+[eé]ff?ectu[eé]e?\b', '', t, flags=re.IGNORECASE)
+    # Pas de cleanup résiduel "remplacement effectué" ici — la règle conservatrice
+    # (sans séparateur + HS) doit garder tout le texte intact.
     t = re.sub(r'^[\s/\-,;.]+','',t); t = re.sub(r'[\s/\-,;.]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
+    # Strip word-level "vétuste/vetuste" (ex: "Sas vétuste" → "Sas" → vide → drop)
+    _VET_RE = re.compile(r'\bv[eé]tuste\b', re.IGNORECASE)
+    if _VET_RE.search(t):
+        t_stripped = _VET_RE.sub('', t).strip()
+        t_stripped = re.sub(r'^[\s/\-,;.]+','',t_stripped).strip()
+        # Si après strip il ne reste que du bruit ou des mots-conteneurs sans valeur → drop
+        _CONTAINER_WORDS = {'sas', 'niveleur', 'porte', 'portesectionnelle'}
+        residual = re.sub(r'\s+', '', t_stripped.lower())
+        if not t_stripped or residual in _CONTAINER_WORDS:
+            return ''
+        t = t_stripped
     bl = blacklist or []
     if is_blacklisted_full(t, bl): return ''
     t = strip_blacklisted_parts(t, bl)
@@ -1042,10 +1062,19 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 if 'flexible' in fl and not_vetuste:
                     has_bavette_flexible = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', fl))
 
+                _EFF_SUM = re.compile(r'[eé]ff?ectu[eé]e?', re.IGNORECASE)
+                _SEP_SUM = re.compile(r'\s*/\s*|\s*\+\s*')
                 for seg in segments_full:
                     sl = seg.lower()
                     seg_matched = False
                     q = eq(seg)
+                    # Cas sans séparateur + HS + effectué → catch-all brut (trop ambigu à catégoriser)
+                    if _EFF_SUM.search(seg) and re.search(r'\bHS\b', seg, re.IGNORECASE):
+                        if len(_SEP_SUM.split(seg)) == 1:
+                            label = seg.strip().rstrip('.')
+                            label = re.sub(r'\s*\(([^)]+)\)', r' \1', label).strip()
+                            add(label, n)
+                            seg_matched = True
 
                     # Panneaux et joints (testés sur le segment)
                     hp = bool(re.search(r'\bpanneau\b|\binterm[eé]diaire\b|\bpi\b|\bpb\b|\bph\b', sl))
@@ -1253,14 +1282,15 @@ def do_update(download_url, log_fn=None):
             "timeout /t 3 /nobreak >nul",
         ]
         if mei_path:
-            # Supprimer l'ancien dossier _MEI AVANT de lancer le nouveau exe.
-            # Boucle retry : attend que Windows libère tous les handles (DLLs) avant de continuer.
+            # Après os._exit ou destroy(), PyInstaller nettoie _MEI via ses atexit handlers.
+            # Le .bat attend que le PID disparaisse (process vraiment mort + handles libérés)
+            # avant de lancer le nouvel exe — évite le crash python312.dll.
             bat_lines += [
-                f":retry_rmdir",
-                f"rmdir /s /q \"{mei_path}\" >nul 2>&1",
-                f"if exist \"{mei_path}\" (",
+                f":wait_exit",
+                f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul',
+                "if not errorlevel 1 (",
                 "    timeout /t 1 /nobreak >nul",
-                "    goto retry_rmdir",
+                "    goto wait_exit",
                 ")",
             ]
         bat_lines += [
@@ -1274,9 +1304,20 @@ def do_update(download_url, log_fn=None):
 
         flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
         subprocess.Popen([bat_path], shell=True, creationflags=flags)
-        # Laisser le .bat se lancer avant que Python quitte
+        # Laisser le .bat se lancer, puis quitter proprement via Tkinter
+        # (os._exit empêche PyInstaller de nettoyer _MEI → crash DLL au redémarrage)
         import time; time.sleep(0.5)
-        os._exit(0)
+        try:
+            root = None
+            import tkinter as _tk
+            for w in _tk._default_root.winfo_children() if _tk._default_root else []:
+                pass
+            if _tk._default_root:
+                _tk._default_root.after(100, _tk._default_root.destroy)
+            else:
+                os._exit(0)
+        except Exception:
+            os._exit(0)
     except Exception as e:
         log(f"Erreur mise à jour : {e}")
 
@@ -1319,18 +1360,11 @@ class SettingsWindow(tk.Toplevel):
         theme_f=tk.Frame(tab0,bg=C_CARD); theme_f.pack(fill='x',padx=16,pady=(0,8))
         tk.Label(theme_f,text="Mode d'affichage :",bg=C_CARD,fg=C_TEXT,font=('Helvetica',9),width=20,anchor='w').pack(side='left')
         self.theme_var=tk.StringVar(value=self.cfg.get('theme','clair'))
-        # Mode clair : icône ☀ alignée nativement
-        tk.Radiobutton(theme_f,text='☀  Mode clair',variable=self.theme_var,value='clair',
-                       bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
-                       activebackground=C_CARD,font=('Helvetica',9),padx=12).pack(side='left',padx=4)
-        # Mode sombre : icône ☾ via Label séparé pour garantir l'alignement vertical
-        rb_sombre_f=tk.Frame(theme_f,bg=C_CARD)
-        rb_sombre_f.pack(side='left',padx=4)
-        tk.Radiobutton(rb_sombre_f,text='  Mode sombre',variable=self.theme_var,value='sombre',
-                       bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
-                       activebackground=C_CARD,font=('Helvetica',9),padx=0).pack(side='right')
-        tk.Label(rb_sombre_f,text='☾',bg=C_CARD,fg=C_TEXT,
-                 font=('Helvetica',9),pady=0).pack(side='left')
+        # ☀ et ☾ sont des symboles Unicode — s'alignent nativement avec le texte Tkinter
+        for val,lbl in [('clair','☀  Mode clair'),('sombre','☾  Mode sombre')]:
+            tk.Radiobutton(theme_f,text=lbl,variable=self.theme_var,value=val,
+                           bg=C_CARD,fg=C_TEXT,selectcolor=C_CARD,
+                           activebackground=C_CARD,font=('Helvetica',9),padx=12).pack(side='left',padx=4)
         tk.Label(tab0,text="Le changement de thème sera appliqué au prochain démarrage de l'application.",
                  bg=C_CARD,fg=C_TEXT2,font=('Helvetica',8),wraplength=580).pack(anchor='w',padx=16,pady=(8,0))
 
