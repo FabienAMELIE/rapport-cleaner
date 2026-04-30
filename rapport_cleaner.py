@@ -19,11 +19,10 @@ from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                  Paragraph, Spacer, Image as RLImage)
-from reportlab.graphics.shapes import Drawing, Rect as RLRect
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.5.1"
+VERSION = "V0.3.5.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -955,15 +954,29 @@ def _condense_summary_label(text):
         return ' + '.join(parts)
     return text
 
-def _make_checkbox():
-    """Carré vide à cocher (impression ou annotation PDF)."""
-    sz = 7 * mm
-    d = Drawing(sz, sz)
-    d.add(RLRect(0.5, 0.5, sz - 1, sz - 1,
-                 strokeColor=colors.HexColor('#444444'),
-                 strokeWidth=0.8,
-                 fillColor=colors.white))
-    return d
+class CheckboxField(Flowable):
+    """Case à cocher AcroForm — cochable nativement dans Acrobat/Adobe Reader."""
+    def __init__(self, name, size=4):
+        Flowable.__init__(self)
+        self.name = name
+        sz = size * mm
+        self.width = sz
+        self.height = sz
+
+    def draw(self):
+        self.canv.acroForm.checkbox(
+            name=self.name,
+            tooltip=self.name,
+            x=0, y=0,
+            size=self.height,
+            checked=False,
+            buttonStyle='check',
+            borderStyle='solid',
+            borderColor=colors.HexColor('#444444'),
+            fillColor=colors.white,
+            textColor=colors.black,
+            forceBorder=True,
+        )
 
 def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, style='standard'):
     if active_col_labels is None: active_col_labels = ['Porte sectionnelle','Niveleur / Quai','SAS']
@@ -1262,8 +1275,12 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
             Paragraph('Devis fournisseur<br/>demandé', hdr_cb),
             Paragraph('Intégré dans<br/>le devis', hdr_cb),
         ]]
-        for text in summary_items:
-            tbl_data.append([Paragraph(text, ns), _make_checkbox(), _make_checkbox()])
+        for i, text in enumerate(summary_items):
+            tbl_data.append([
+                Paragraph(text, ns),
+                CheckboxField(f'fournisseur_{i}'),
+                CheckboxField(f'devis_{i}'),
+            ])
         sum_tbl = Table(tbl_data, colWidths=[TEXT_W, CB_W, CB_W])
         sum_tbl.setStyle(TableStyle([
             ('BACKGROUND',    (1, 0), (2, 0),  HEADER_BG),
@@ -1279,9 +1296,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         story.append(sum_tbl)
     for note in tech_notes:
         story.append(Paragraph(f"<b>Note technicien :</b> {note}", note_style))
-    story.append(Spacer(1,6))
-    story.append(Table([['']],colWidths=[257*mm],style=TableStyle([('LINEABOVE',(0,0),(-1,-1),0.5,colors.HexColor('#cccccc'))])))
-    story.append(Spacer(1,6))
+    story.append(Spacer(1, 8))
     return story
 
 # ── Fenêtre Paramètres ────────────────────────────────────────────────────────
