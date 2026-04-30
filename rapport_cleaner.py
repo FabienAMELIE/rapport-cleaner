@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.4.2"
+VERSION = "V0.3.5"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -784,13 +784,17 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
                     if m: quais.setdefault(int(m.group(1)),{})['porte']=(serie,com)
                 elif re.search(r'niveleur', nom, re.IGNORECASE):
                     # ^(\d+) évite de matcher le modèle en fin ("2 Niveleur 232" → 2, pas 232)
+                    # (\d+)\s*$ : fallback quai en fin de nom ("Niveleur bavette pivotant 8" → 8)
                     m = re.search(r':\s*(\d+)', nom) or \
-                        re.search(r'^(\d+)\b', nom)
+                        re.search(r'^(\d+)\b', nom) or \
+                        re.search(r'(\d+)\s*$', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['niv']=(serie,com)
                 elif re.search(r'\bsas\b', nom, re.IGNORECASE):
                     # ^(\d+) évite de matcher les dims en fin ("2 Sas 403 ... bande jaune" → 2)
+                    # (\d+)\s*$ : fallback quai en fin de nom ("Sas d'étanchéité 8" → 8)
                     m = re.search(r'(?:abloy)\s+(\d+)', nom, re.IGNORECASE) or \
-                        re.search(r'^(\d+)\b', nom)
+                        re.search(r'^(\d+)\b', nom) or \
+                        re.search(r'(\d+)\s*$', nom)
                     if m: quais.setdefault(int(m.group(1)),{})['sas']=(serie,com)
     rows_data = []
     for qn in sorted(quais.keys()):
