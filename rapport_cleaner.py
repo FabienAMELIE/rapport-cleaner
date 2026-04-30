@@ -19,10 +19,11 @@ from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                  Paragraph, Spacer, Image as RLImage)
+from reportlab.graphics.shapes import Drawing, Rect as RLRect
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.5"
+VERSION = "V0.3.5.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -176,12 +177,15 @@ def fix_word_breaks(text):
     # Ex: 'sectionneur r hs'       -> 'sectionneur hs'      ('r' = doublon)
     # Exclusions : mots courts legitimes du francais (NEVER_SUFFIX) + 'ce','se','me','te','ne'
     _RESIDUAL_EXCL = NEVER_SUFFIX | {'ce', 'se', 'me', 'te', 'ne', 'que', 'elle', 'ment'}
+    _ALWAYS_DROP_FRAGMENTS = {'ement', 'issement'}
     def _drop_residual(m):
         word, frag = m.group(1), m.group(2)
+        if frag.lower() in _ALWAYS_DROP_FRAGMENTS:
+            return word
         if word.lower().endswith(frag.lower()) and frag.lower() not in _RESIDUAL_EXCL:
             return word
         return m.group(0)
-    joined = re.sub(r'([a-zA-ZÀ-ÿ]{5,}) ([a-zA-ZÀ-ÿ]{1,5})\b', _drop_residual, joined)
+    joined = re.sub(r'([a-zA-ZÀ-ÿ]{5,}) ([a-zA-ZÀ-ÿ]{1,8})\b', _drop_residual, joined)
     return joined
 
 def strip_choc(text):
@@ -951,6 +955,16 @@ def _condense_summary_label(text):
         return ' + '.join(parts)
     return text
 
+def _make_checkbox():
+    """Carré vide à cocher (impression ou annotation PDF)."""
+    sz = 7 * mm
+    d = Drawing(sz, sz)
+    d.add(RLRect(0.5, 0.5, sz - 1, sz - 1,
+                 strokeColor=colors.HexColor('#444444'),
+                 strokeWidth=0.8,
+                 fillColor=colors.white))
+    return d
+
 def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, style='standard'):
     if active_col_labels is None: active_col_labels = ['Porte sectionnelle','Niveleur / Quai','SAS']
     if tech_notes is None: tech_notes = []
@@ -1223,18 +1237,46 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     else:
         story.append(Paragraph(titre_final, ts))
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
+    # ── Tableau résumé avec cases à cocher ───────────────────────────────────
+    page_content_w = landscape(A4)[0] - 20*mm
+    CB_W = 42*mm
+    TEXT_W = page_content_w - 2 * CB_W
+    hdr_cb = ParagraphStyle('hcb', fontSize=7.5, fontName='Helvetica-Bold',
+                             alignment=1, textColor=colors.white, leading=10)
+    summary_items = []
     # Ordre d'affichage des tendeurs/crochets : E > L > Crochet S > C
     _TENDEUR_ORDER = ['Tendeur E (extensible)', 'Tendeur L (long)', 'Crochet S', 'Tendeur C (court)']
     for lbl in _TENDEUR_ORDER:
-        if lbl in tcats: story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
+        if lbl in tcats: summary_items.append(fmt(lbl, tcats[lbl]))
     for lbl in sorted(tcats.keys()):
-        if lbl not in _TENDEUR_ORDER: story.append(Paragraph(fmt(lbl,tcats[lbl]),ns))
-    # Afficher les panneaux consécutivement (PB -> PI -> PH) puis le reste des cats
+        if lbl not in _TENDEUR_ORDER: summary_items.append(fmt(lbl, tcats[lbl]))
+    # Panneaux consécutifs (PB -> PI -> PH) puis reste des cats
     _PANNEAU_ORDER = ['Panneau bas', 'Panneau intermédiaire', 'Panneau haut', 'Joint']
     for lbl in _PANNEAU_ORDER:
-        if lbl in cats: story.append(Paragraph(fmt(lbl,cats[lbl]),ns))
-    for c,d in cats.items():
-        if c not in _PANNEAU_ORDER: story.append(Paragraph(fmt(c,d),ns))
+        if lbl in cats: summary_items.append(fmt(lbl, cats[lbl]))
+    for c, d in cats.items():
+        if c not in _PANNEAU_ORDER: summary_items.append(fmt(c, d))
+    if summary_items:
+        tbl_data = [[
+            Paragraph('', ns),
+            Paragraph('Devis fournisseur<br/>demandé', hdr_cb),
+            Paragraph('Intégré dans<br/>le devis', hdr_cb),
+        ]]
+        for text in summary_items:
+            tbl_data.append([Paragraph(text, ns), _make_checkbox(), _make_checkbox()])
+        sum_tbl = Table(tbl_data, colWidths=[TEXT_W, CB_W, CB_W])
+        sum_tbl.setStyle(TableStyle([
+            ('BACKGROUND',    (1, 0), (2, 0),  HEADER_BG),
+            ('ALIGN',         (1, 0), (2, -1), 'CENTER'),
+            ('VALIGN',        (0, 0), (-1, -1),'MIDDLE'),
+            ('TOPPADDING',    (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 4),
+            ('LINEBELOW',     (0, 0), (-1, -1), 0.3, colors.HexColor('#dddddd')),
+            ('ROWHEIGHT',     (0, 0), (-1,  0), 8*mm),
+        ]))
+        story.append(sum_tbl)
     for note in tech_notes:
         story.append(Paragraph(f"<b>Note technicien :</b> {note}", note_style))
     story.append(Spacer(1,6))
@@ -1282,25 +1324,21 @@ def do_update(download_url, log_fn=None):
         # remplace l'exe, relance depuis son répertoire, se supprime.
         bat_lines = [
             "@echo off",
-            f"taskkill /f /pid {pid} >nul 2>&1",
-            "timeout /t 3 /nobreak >nul",
+            "set /a count=0",
+            ":wait_exit",
+            f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul',
+            "if not errorlevel 1 (",
+            "    set /a count+=1",
+            "    if %count% geq 30 goto do_update",
+            "    timeout /t 1 /nobreak >nul",
+            "    goto wait_exit",
+            ")",
+            ":do_update",
         ]
-        if mei_path:
-            # Après os._exit ou destroy(), PyInstaller nettoie _MEI via ses atexit handlers.
-            # Le .bat attend que le PID disparaisse (process vraiment mort + handles libérés)
-            # avant de lancer le nouvel exe — évite le crash python312.dll.
-            bat_lines += [
-                f":wait_exit",
-                f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul',
-                "if not errorlevel 1 (",
-                "    timeout /t 1 /nobreak >nul",
-                "    goto wait_exit",
-                ")",
-            ]
         bat_lines += [
-            f"move /y \"{tmp_exe}\" \"{exe_path}\"",
-            f"start \"\" /d \"{exe_dir}\" \"{exe_path}\" {UPDATER_FLAG}",
-            "del \"%~f0\"",
+            f'move /y "{tmp_exe}" "{exe_path}"',
+            f'start "" /d "{exe_dir}" "{exe_path}" {UPDATER_FLAG}',
+            'del "%~f0"',
         ]
 
         with open(bat_path, 'w') as f:
@@ -1986,6 +2024,17 @@ class App(_AppBase):
                     progress_fn=lambda v: self.after(0,lambda val=v: self._set_progress(val)))
                 self.after(0,lambda: self._set_progress(100, done=True))
                 self.after(0,lambda: messagebox.showinfo("Terminé ✓",f"PDF généré avec succès !\n\n{out}"))
+            except PermissionError:
+                def _ask_retry(p=pdf, o=out, s=structure):
+                    if messagebox.askretrycancel(
+                        "Fichier inaccessible",
+                        f"Le fichier de sortie est déjà ouvert dans une autre application.\n\n"
+                        f"Fermez-le puis cliquez sur Réessayer.\n\n{os.path.basename(o)}"
+                    ):
+                        self._do_generate(p, o, s)
+                    else:
+                        self._set_progress(0)
+                self.after(0, _ask_retry)
             except Exception as e:
                 self.after(0,lambda: self._log(f"❌ Erreur : {e}"))
                 self.after(0,lambda: messagebox.showerror("Erreur",str(e)))
