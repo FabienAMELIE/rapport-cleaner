@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.5.2"
+VERSION = "V0.3.5.3"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -964,10 +964,13 @@ class CheckboxField(Flowable):
         self.height = sz
 
     def draw(self):
+        # Coordonnées absolues via la matrice de transformation courante
+        m = self.canv._currentMatrix
+        abs_x, abs_y = m[4], m[5]
         self.canv.acroForm.checkbox(
             name=self.name,
             tooltip=self.name,
-            x=0, y=0,
+            x=abs_x, y=abs_y,
             size=self.height,
             checked=False,
             buttonStyle='check',
@@ -975,6 +978,55 @@ class CheckboxField(Flowable):
             borderColor=colors.HexColor('#444444'),
             fillColor=colors.white,
             textColor=colors.black,
+            forceBorder=True,
+        )
+
+
+class CheckboxWithTextField(Flowable):
+    """Case à cocher + champ texte fournisseur côte à côte (AcroForm)."""
+    def __init__(self, cb_name, tf_name, total_width, size=4):
+        Flowable.__init__(self)
+        self.cb_name = cb_name
+        self.tf_name = tf_name
+        sz = size * mm
+        self.cb_size = sz
+        self.gap = 2 * mm
+        self.width = total_width
+        self.height = sz
+        self.tf_width = max(total_width - sz - self.gap, 10*mm)
+
+    def draw(self):
+        m = self.canv._currentMatrix
+        abs_x, abs_y = m[4], m[5]
+        # Case à cocher à gauche
+        self.canv.acroForm.checkbox(
+            name=self.cb_name,
+            tooltip=self.cb_name,
+            x=abs_x, y=abs_y,
+            size=self.cb_size,
+            checked=False,
+            buttonStyle='check',
+            borderStyle='solid',
+            borderColor=colors.HexColor('#444444'),
+            fillColor=colors.white,
+            textColor=colors.black,
+            forceBorder=True,
+        )
+        # Champ texte fournisseur à droite
+        self.canv.acroForm.textfield(
+            name=self.tf_name,
+            tooltip='Nom du fournisseur',
+            x=abs_x + self.cb_size + self.gap,
+            y=abs_y,
+            width=self.tf_width,
+            height=self.cb_size,
+            borderColor=colors.HexColor('#aaaaaa'),
+            fillColor=colors.HexColor('#fafafa'),
+            textColor=colors.black,
+            fontSize=7,
+            fontName='Helvetica',
+            borderWidth=0.5,
+            borderStyle='solid',
             forceBorder=True,
         )
 
@@ -1252,8 +1304,11 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     # ── Tableau résumé avec cases à cocher ───────────────────────────────────
     page_content_w = landscape(A4)[0] - 20*mm
-    CB_W = 42*mm
-    TEXT_W = page_content_w - 2 * CB_W
+    TEXT_W  = 150*mm   # colonne anomalie
+    FOUR_W  = 72*mm    # "Devis fournisseur demandé" (case + champ texte)
+    CB_W    = page_content_w - TEXT_W - FOUR_W  # "Intégré dans le devis"
+    # Largeur utile du widget dans la cellule (padding 4mm de chaque côté)
+    FOUR_INNER = FOUR_W - 8*mm
     hdr_cb = ParagraphStyle('hcb', fontSize=7.5, fontName='Helvetica-Bold',
                              alignment=1, textColor=colors.white, leading=10)
     summary_items = []
@@ -1272,16 +1327,16 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     if summary_items:
         tbl_data = [[
             Paragraph('', ns),
-            Paragraph('Devis fournisseur<br/>demandé', hdr_cb),
+            Paragraph('Devis fournisseur demandé', hdr_cb),
             Paragraph('Intégré dans<br/>le devis', hdr_cb),
         ]]
         for i, text in enumerate(summary_items):
             tbl_data.append([
                 Paragraph(text, ns),
-                CheckboxField(f'fournisseur_{i}'),
+                CheckboxWithTextField(f'fournisseur_{i}', f'fournisseur_nom_{i}', FOUR_INNER),
                 CheckboxField(f'devis_{i}'),
             ])
-        sum_tbl = Table(tbl_data, colWidths=[TEXT_W, CB_W, CB_W])
+        sum_tbl = Table(tbl_data, colWidths=[TEXT_W, FOUR_W, CB_W])
         sum_tbl.setStyle(TableStyle([
             ('BACKGROUND',    (1, 0), (2, 0),  HEADER_BG),
             ('ALIGN',         (1, 0), (2, -1), 'CENTER'),
