@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6"
+VERSION = "V0.3.6.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -316,11 +316,13 @@ def fix_fused_words(text):
 def _propagate_hs(text):
     """Si le dernier segment contient HS, le propage aux segments précédents qui n'en ont pas.
     Ex: "Panneau bas + inter bas HS" → "Panneau bas HS + inter bas HS"
+    Ne propage pas à travers un point (artefact ". HS" attaché à un segment non-HS).
     """
     if not text or not re.search(r'\bHS\b', text, re.IGNORECASE): return text
+    # Supprimer les HS orphelins après un point : "en nacelle. HS +" → "en nacelle. +"
+    text = re.sub(r'\.\s+HS\b\s*(?=\+)', '.', text, flags=re.IGNORECASE)
     segs = re.split(r'\s*\+\s*', text.strip())
     if len(segs) <= 1: return text
-    # Vérifier que le dernier segment contient HS
     if not re.search(r'\bHS\b', segs[-1], re.IGNORECASE): return text
     result = []
     for seg in segs:
@@ -576,7 +578,9 @@ HEADER_BG = colors.HexColor('#404040')
 
 def make_cell(text, bold=False, size=8, color=None):
     if color is None: color = TXT
-    return Paragraph(str(text), ParagraphStyle('c', fontSize=size,
+    # Remplacer ' / ' par <br/> pour segmenter visuellement les anomalies multiples
+    text = str(text).replace(' / ', '<br/>')
+    return Paragraph(text, ParagraphStyle('c', fontSize=size,
         fontName='Helvetica-Bold' if bold else 'Helvetica',
         textColor=color, leading=size*1.3))
 
@@ -1274,6 +1278,18 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     # Exclusion résumé : constats d'accès sans anomalie à chiffrer
                     if re.search(r'rampe\s+(?:ressort\s+)?non\s+accessible', sl, re.IGNORECASE):
                         seg_matched = True  # supprimé du résumé
+                    # Exclusion résumé : constats/observations sans action de chiffrage
+                    _EXCLUDE_SUMMARY = [
+                        r'fonctionnement\s+en\s+homme\s+mort',
+                        r'niveleur\s+fonctionne\s+m[eê]me\s+porte\s+ferm',
+                        r'cable\s+dans\s+l.armoire\s+.*non\s+branch',
+                        r'cable\s+non\s+branch',
+                        r'aimant\s+pour\s+retirer\s+les\s+cales',
+                        r'pr[eé]voir\s+une?\s+p[aâ]te',
+                        r'p[aâ]te\s+sur\s+la\s+porte',
+                    ]
+                    if not seg_matched and any(re.search(p, sl, re.IGNORECASE) for p in _EXCLUDE_SUMMARY):
+                        seg_matched = True
                     if ('corde' in sl or 'câble' in sl and 'traction' in sl) and not_vetuste:
                         no_action = any(x in sl for x in ['a fixer','a refixer','stock client','remplacement effectué'])
                         if not no_action: add('Corde HS', n); seg_matched = True
@@ -1350,10 +1366,9 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     # ── Tableau résumé avec cases à cocher ───────────────────────────────────
     page_content_w = landscape(A4)[0] - 20*mm
-    TEXT_W  = 160*mm   # colonne anomalie
-    FOUR_W  = 58*mm    # "Devis fournisseur demandé" (case + champ texte)
+    TEXT_W  = 175*mm   # colonne anomalie
+    FOUR_W  = 48*mm    # "Devis fournisseur demandé" (case + champ texte)
     CB_W    = page_content_w - TEXT_W - FOUR_W  # "Intégré dans le devis"
-    # Largeur utile du widget dans la cellule (padding 4mm de chaque côté)
     FOUR_INNER = FOUR_W - 8*mm
     hdr_cb = ParagraphStyle('hcb', fontSize=7.5, fontName='Helvetica-Bold',
                              alignment=1, textColor=colors.white, leading=10)
@@ -1364,9 +1379,6 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         if lbl in tcats: summary_items.append(fmt(lbl, tcats[lbl]))
     for lbl in sorted(tcats.keys()):
         if lbl not in _TENDEUR_ORDER: summary_items.append(fmt(lbl, tcats[lbl]))
-    # Bague de serrage (agrégée dans tcats)
-    if 'Ajout bague de serrage' in tcats:
-        summary_items.append(fmt('Ajout bague de serrage', tcats['Ajout bague de serrage']))
     # Panneaux consécutifs (PB -> PI -> PH) puis reste des cats
     _PANNEAU_ORDER = ['Panneau bas', 'Panneau intermédiaire', 'Panneau haut', 'Joint']
     for lbl in _PANNEAU_ORDER:
