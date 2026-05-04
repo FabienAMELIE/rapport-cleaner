@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.5.4"
+VERSION = "V0.3.6"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -1453,6 +1453,7 @@ def do_update(download_url, log_fn=None):
             "    goto wait_exit",
             ")",
             ":do_update",
+            "timeout /t 2 /nobreak >nul",
         ]
         bat_lines += [
             f'move /y "{tmp_exe}" "{exe_path}"',
