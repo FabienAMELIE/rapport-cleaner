@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.3"
+VERSION = "V0.3.6.3.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -239,6 +239,7 @@ def strip_choc(text):
     for is_choc, part in kept_tagged:
         if not part: continue
         if is_choc:
+            # Segment choc : nettoyage complet
             p = choc_re.sub('', part)
             p = re.sub(r'\bchoquée?\b', '', p, flags=re.IGNORECASE)
             for pat in _CLEANUP_PATS:
@@ -248,7 +249,19 @@ def strip_choc(text):
             p = re.sub(r'[\s\+\-,;]+$', '', p)
             p = re.sub(r' {2,}', ' ', p).strip()
             if p: result_parts.append(p)
+        elif re.search(r'\bchoc\b', part, re.IGNORECASE):
+            # Choc au milieu du segment : supprimer la description choc + résidus
+            # Après split sur +, ce segment ne contient jamais profil/joint → _CLEANUP_PATS safe
+            p = choc_re.sub('', part)
+            p = re.sub(r'\bchoquée?\b', '', p, flags=re.IGNORECASE)
+            for pat in _CLEANUP_PATS:
+                p = re.sub(pat, '', p, flags=re.IGNORECASE)
+            p = re.sub(r'^[\s\+\-,;.]+', '', p)
+            p = re.sub(r'[\s\+\-,;]+$', '', p)
+            p = re.sub(r' {2,}', ' ', p).strip()
+            if p: result_parts.append(p)
         else:
+            # Segment sans choc : préserver intégralement
             result_parts.append(part)
     s = ' + '.join(result_parts)
     if has_hs:
