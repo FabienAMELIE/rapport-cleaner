@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.2"
+VERSION = "V0.3.6.3"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -209,42 +209,48 @@ def strip_choc(text):
         r'(?:\+\s*(?:pb|pi|ph|panneau\s+(?:bas|intermédiaire|intermediaire|haut))\s*)*'
         r'(?:\+?\s*hublot\s+\w+(?:\s+\w+)?\s+[\d×x]+(?:x\d+)?\s*)?', re.IGNORECASE)
     # Étape 1 : filtrer les segments commençant par "choc" sans HS
-    # Si le segment contient du contenu utile APRES le choc, le conserver
-    # Ex: "Choc PB Suspente a refaire..." -> strip choc -> "Suspente a refaire..." (GARDE)
-    # Ex: "Choc PB" -> strip choc -> "" (SUPPRIME)
+    # Tagguer chaque segment : True = issu d'un segment choc, False = segment non-choc à préserver
     segs = re.split(r'\s*\+\s*', t)
-    kept = []
+    kept_tagged = []
     for seg in segs:
         seg_s = seg.strip()
         if re.match(r'^(?:léger\s+)?choc\b', seg_s, re.IGNORECASE):
             if re.search(r'\bHS\b', seg_s, re.IGNORECASE):
-                kept.append(seg_s)  # Garder si HS present
+                kept_tagged.append((True, seg_s))
             else:
-                # Appliquer choc_re pour extraire le contenu non-choc residuel
                 residual = choc_re.sub('', seg_s).strip()
                 residual = re.sub(r'^[\s\+\-,;.]+', '', residual).strip()
                 if residual:
-                    kept.append(residual)  # Garder le contenu utile apres choc
-                # sinon segment purement choc -> supprime
+                    kept_tagged.append((True, residual))
         else:
-            kept.append(seg_s)
-    s = ' + '.join(x for x in kept if x)
-    # Étape 2 : choc_re sur ce qui reste (chocs non isolés par +)
-    s = choc_re.sub('', s)
-    # Étape 3 : supprimer "choqué(e)" standalone
-    s = re.sub(r'\bchoquée?\b', '', s, flags=re.IGNORECASE)
-    for pat in [r'\b\d{3,4}x\d{3,4}(?:x\d+)?\b', r'\bx\d+\b(?!\s*cm)',
-                r'\b(?:nordsud|nord|sud|ral\s*\d*)\b',
-                r'\b(?:intérieur|extérieur|interieur|exterieur)\s+(?:\w+\s+)?\d{3,4}\b',
-                r'\bet\s+(?:intérieur|extérieur)\s+\w+\b',
-                r'\b\d+\s*x\b(?!\s*\d)',
-                r'\b(?:extérieur|intérieur|exterieur|interieur)\s*(?:et\s*)?$',
-                r'\b(?:inter|panneau|bas|léger|leger|droite|gauche)\b',
-                r'\bpoutre\s+avant\b']:
-        s = re.sub(pat, '', s, flags=re.IGNORECASE)
-    s = re.sub(r'\bpanneau(bas|haut|intermédiaire|intermediaire)\b', r'Panneau \1', s, flags=re.IGNORECASE)
-    s = re.sub(r'^[\s\+\-,;]+','',s); s = re.sub(r'[\s\+\-,;]+$','',s)
-    s = re.sub(r' {2,}',' ',s).strip()
+            kept_tagged.append((False, seg_s))
+    # Étape 2 : appliquer nettoyage UNIQUEMENT aux segments choc-dérivés
+    _CLEANUP_PATS = [
+        r'\b\d{3,4}x\d{3,4}(?:x\d+)?\b', r'\bx\d+\b(?!\s*cm)',
+        r'\b(?:nordsud|nord|sud|ral\s*\d*)\b',
+        r'\b(?:intérieur|extérieur|interieur|exterieur)\s+(?:\w+\s+)?\d{3,4}\b',
+        r'\bet\s+(?:intérieur|extérieur)\s+\w+\b',
+        r'\b\d+\s*x\b(?!\s*\d)',
+        r'\b(?:extérieur|intérieur|exterieur|interieur)\s*(?:et\s*)?$',
+        r'\b(?:inter|panneau|bas|léger|leger|droite|gauche)\b',
+        r'\bpoutre\s+avant\b',
+    ]
+    result_parts = []
+    for is_choc, part in kept_tagged:
+        if not part: continue
+        if is_choc:
+            p = choc_re.sub('', part)
+            p = re.sub(r'\bchoquée?\b', '', p, flags=re.IGNORECASE)
+            for pat in _CLEANUP_PATS:
+                p = re.sub(pat, '', p, flags=re.IGNORECASE)
+            p = re.sub(r'\bpanneau(bas|haut|intermédiaire|intermediaire)\b', r'Panneau \1', p, flags=re.IGNORECASE)
+            p = re.sub(r'^[\s\+\-,;]+', '', p)
+            p = re.sub(r'[\s\+\-,;]+$', '', p)
+            p = re.sub(r' {2,}', ' ', p).strip()
+            if p: result_parts.append(p)
+        else:
+            result_parts.append(part)
+    s = ' + '.join(result_parts)
     if has_hs:
         garbled = bool(re.match(r'^[a-zA-Z]\s*[,\.]',s)) or \
                   len(re.findall(r'\b[a-zA-ZÀ-ÿ]\b',s))>2 or (s and len(s)<8)
@@ -1453,66 +1459,49 @@ def check_latest_version():
         return None, None
 
 def do_update(download_url, log_fn=None):
-    """Télécharge le nouveau .exe dans Temp, écrit un .bat dans Temp pour remplacer et relancer."""
+    """Nouveau mécanisme MAJ sans race condition Defender :
+    1. Télécharge le nouvel exe dans le même dossier que l'exe courant
+    2. Renomme l'ancien exe en _old (Windows autorise rename d'un exe en cours)
+    3. Place le nouvel exe au bon emplacement
+    4. Ferme l'app avec compte à rebours (Defender a le temps de scanner)
+    5. L'utilisateur relance → nouvel exe déjà scanné → pas de DLL error
+    6. Au prochain démarrage, _old est supprimé
+    """
     def log(msg):
         if log_fn: log_fn(msg)
     try:
-        import tempfile
-        exe_path = sys.executable
-        exe_dir  = os.path.dirname(os.path.abspath(exe_path))
-        pid      = os.getpid()
-        mei_path = getattr(sys, '_MEIPASS', None)
-        tmp_dir  = tempfile.gettempdir()
-        tmp_exe  = os.path.join(tmp_dir, "RapportCleaner_update.exe")
-        bat_path = os.path.join(tmp_dir, "rc_updater.bat")
+        exe_path = os.path.abspath(sys.executable)
+        exe_dir  = os.path.dirname(exe_path)
+        exe_name = os.path.basename(exe_path)
+        old_path = os.path.join(exe_dir, exe_name.replace('.exe', '_old.exe'))
+        new_tmp  = os.path.join(exe_dir, exe_name.replace('.exe', '_update.exe'))
 
         log("Téléchargement en cours...")
-        urllib.request.urlretrieve(download_url, tmp_exe)
-        log("Téléchargement terminé. Fermeture et redémarrage...")
+        urllib.request.urlretrieve(download_url, new_tmp)
+        log("Téléchargement terminé. Installation...")
 
-        # Le .bat : tue le process, supprime l'ancien dossier _MEI (PyInstaller),
-        # remplace l'exe, relance depuis son répertoire, se supprime.
-        bat_lines = [
-            "@echo off",
-            "set /a count=0",
-            ":wait_exit",
-            f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul',
-            "if not errorlevel 1 (",
-            "    set /a count+=1",
-            "    if %count% geq 30 goto do_update",
-            "    timeout /t 1 /nobreak >nul",
-            "    goto wait_exit",
-            ")",
-            ":do_update",
-            "timeout /t 2 /nobreak >nul",
-        ]
-        if mei_path:
-            bat_lines += [f'rmdir /s /q "{mei_path}" 2>nul']
-        bat_lines += [
-            f'move /y "{tmp_exe}" "{exe_path}"',
-            f'start "" /d "{exe_dir}" "{exe_path}" {UPDATER_FLAG}',
-            'del "%~f0"',
-        ]
+        # Renommer l'ancien exe en _old (possible même si en cours d'exécution)
+        if os.path.exists(old_path):
+            try: os.remove(old_path)
+            except: pass
+        os.rename(exe_path, old_path)
+        # Placer le nouvel exe
+        os.rename(new_tmp, exe_path)
+        log("Mise à jour prête. L'application va se fermer...")
 
-        with open(bat_path, 'w') as f:
-            f.write('\n'.join(bat_lines) + '\n')
-
-        flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        subprocess.Popen([bat_path], shell=True, creationflags=flags)
-        # Laisser le .bat se lancer, puis quitter proprement via Tkinter
-        # (os._exit empêche PyInstaller de nettoyer _MEI → crash DLL au redémarrage)
-        import time; time.sleep(0.5)
-        try:
-            root = None
+        # Fermer avec compte à rebours via Tkinter
+        import time
+        def _countdown_and_close():
             import tkinter as _tk
-            for w in _tk._default_root.winfo_children() if _tk._default_root else []:
-                pass
-            if _tk._default_root:
-                _tk._default_root.after(100, _tk._default_root.destroy)
-            else:
-                os._exit(0)
-        except Exception:
-            os._exit(0)
+            if not _tk._default_root: os._exit(0)
+            root = _tk._default_root
+            for i in range(5, 0, -1):
+                log(f"Fermeture dans {i} seconde{'s' if i>1 else ''}...")
+                time.sleep(1)
+            root.after(0, root.destroy)
+        import threading
+        threading.Thread(target=_countdown_and_close, daemon=True).start()
+
     except Exception as e:
         log(f"Erreur mise à jour : {e}")
 
@@ -2209,6 +2198,13 @@ class App(_AppBase):
             self.progress['value'] = value
 
 if __name__ == '__main__':
+    # Nettoyage de l'ancien exe _old laissé par une mise à jour précédente
+    try:
+        _exe = os.path.abspath(sys.executable)
+        _old = _exe.replace('.exe', '_old.exe')
+        if os.path.exists(_old):
+            os.remove(_old)
+    except: pass
     app = App()
     if UPDATER_FLAG in sys.argv:
         # Petite bannière de notification mise à jour
