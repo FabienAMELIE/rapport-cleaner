@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.5.3"
+VERSION = "V0.3.5.4"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -122,6 +122,9 @@ NEVER_SUFFIX = {'bas','les','des','sur','par','pas','ou','et','en','un','une',
 
 def fix_word_breaks(text):
     if not text: return text
+    # Normalisation des chiffres exposants (ex: ⁸ → 8, causent sinon des ■ dans pdfplumber)
+    _SUPERSCRIPTS = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹', '0123456789')
+    text = text.translate(_SUPERSCRIPTS)
     text = re.sub(r'\r\n|\r', '\n', text)
     lines = text.split('\n')
     result = []; i = 0
@@ -975,7 +978,7 @@ class CheckboxField(Flowable):
             checked=False,
             buttonStyle='check',
             borderStyle='solid',
-            borderColor=colors.HexColor('#444444'),
+            borderColor=colors.black,
             fillColor=colors.white,
             textColor=colors.black,
             forceBorder=True,
@@ -1007,7 +1010,7 @@ class CheckboxWithTextField(Flowable):
             checked=False,
             buttonStyle='check',
             borderStyle='solid',
-            borderColor=colors.HexColor('#444444'),
+            borderColor=colors.black,
             fillColor=colors.white,
             textColor=colors.black,
             forceBorder=True,
@@ -1159,15 +1162,44 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                             add(label, n)
                             seg_matched = True
 
-                    # Panneaux et joints (testés sur le segment)
+                    # Panneaux, profils et joints
                     hp = bool(re.search(r'\bpanneau\b|\binterm[eé]diaire\b|\bpi\b|\bpb\b|\bph\b', sl))
                     hj = bool(re.search(r'\bjoint\b', sl))
-                    if hp or hj:
+                    hprofil = bool(re.search(r'\bprofil\b', sl))
+                    if hp or hj or hprofil:
                         seg_matched = True
-                        if re.search(r'\bjoint\b', sl): add('Joint', n, q)
-                        if re.search(r'\bpanneau\s+bas\b|\bpb\b', sl): add('Panneau bas', n, q)
-                        if re.search(r'\bpanneau\s+haut\b|\bph\b', sl): add('Panneau haut', n, q)
-                        if re.search(r'\bpanneau\s+(?:inter\w*|interm[eé]diaire)\b|\bpi\b|\binterm[eé]diaire\b|\binter\s*(?:hublot|hs|et|\b)', sl): add('Panneau intermédiaire', n, q)
+                        has_profil = hprofil
+                        has_joint  = hj
+                        has_panneau = hp
+                        is_bas     = bool(re.search(r'\bbas\b|\bpb\b', sl))
+                        is_haut    = bool(re.search(r'\bhaut\b|\bph\b', sl))
+                        is_lat     = bool(re.search(r'\blat[eé]ral\b', sl))
+                        is_inter   = bool(re.search(r'\bpanneau\s+(?:inter\w*|interm[eé]diaire)\b|\bpi\b|\binterm[eé]diaire\b', sl))
+                        # Quantité panneau : ignorer les cotes dimensionnelles (ex: 2850x610)
+                        m_pq = re.match(r'^\s*(\d+)\s+(?:panneau|profil|joint)', seg, re.IGNORECASE)
+                        pq = int(m_pq.group(1)) if m_pq else 1
+                        # Cas profil/joint : prioritaire si présent (pas un remplacement de panneau)
+                        if has_profil or has_joint:
+                            if has_profil and has_joint:
+                                if is_bas:  add('Profil & joint bas HS', n, pq)
+                                elif is_lat: add('Profil & joint latéral HS', n, pq)
+                                elif is_haut: add('Profil & joint haut HS', n, pq)
+                                else: add('Profil & joint HS', n, pq)
+                            elif has_profil:
+                                if is_bas:  add('Profil panneau bas HS', n, pq)
+                                elif is_lat: add('Profil latéral HS', n, pq)
+                                elif is_haut: add('Profil haut HS', n, pq)
+                                else: add('Profil HS', n, pq)
+                            else:  # joint seul
+                                if is_bas:  add('Joint bas HS', n, pq)
+                                elif is_lat: add('Joint latéral HS', n, pq)
+                                elif is_haut: add('Joint haut HS', n, pq)
+                                else: add('Joint HS', n, pq)
+                        # Panneau sans profil/joint → remplacement panneau
+                        if has_panneau and not has_profil and not has_joint:
+                            if re.search(r'\bpanneau\s+bas\b|\bpb\b', sl): add('Panneau bas', n, pq)
+                            if re.search(r'\bpanneau\s+haut\b|\bph\b', sl): add('Panneau haut', n, pq)
+                            if is_inter: add('Panneau intermédiaire', n, pq)
 
                     if 'suspente' in sl: add('Suspente à refaire', n); seg_matched = True
                     if 'flexible' in sl and not_vetuste:
@@ -1226,8 +1258,22 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     if 'charnière' in sl and not_vetuste: add('Charnière HS', n); seg_matched = True
                     if 'soudure' in sl: add('Soudure à refaire', n); seg_matched = True
                     if 'traverse' in sl: add('Traverse déformée', n); seg_matched = True
-                    if 'devis' in sl: add('Devis en cours', n); seg_matched = True
                     if 'cellule' in sl or 'asservissement' in sl: add('Absence cellule asservissement', n); seg_matched = True
+                    # Ampoules : toutes variantes fusionnées par position int/ext
+                    if re.search(r'\bampoule\b', sl) and not_vetuste:
+                        if re.search(r'\bint[eé]r', sl): add('Ampoule feu rouge intérieur HS', n)
+                        elif re.search(r'\bext[eé]r', sl): add('Ampoule feu rouge extérieur HS', n)
+                        else: add('Ampoule HS', n)
+                        seg_matched = True
+                    # Bagues de serrage : agrégation avec quantité
+                    if re.search(r'\bbague\b', sl) and re.search(r'\bserrage\b', sl):
+                        m_bq = re.search(r'(\d+)\s+bague', sl)
+                        bq = int(m_bq.group(1)) if m_bq else 1
+                        addt('Ajout bague de serrage', n, bq)
+                        seg_matched = True
+                    # Exclusion résumé : constats d'accès sans anomalie à chiffrer
+                    if re.search(r'rampe\s+(?:ressort\s+)?non\s+accessible', sl, re.IGNORECASE):
+                        seg_matched = True  # supprimé du résumé
                     if ('corde' in sl or 'câble' in sl and 'traction' in sl) and not_vetuste:
                         no_action = any(x in sl for x in ['a fixer','a refixer','stock client','remplacement effectué'])
                         if not no_action: add('Corde HS', n); seg_matched = True
@@ -1304,8 +1350,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     if vns: story.append(Paragraph(f"<b>Vidange groupe hydraulique recommandée</b> ({len(vns)}) : {', '.join(vns)}",ns))
     # ── Tableau résumé avec cases à cocher ───────────────────────────────────
     page_content_w = landscape(A4)[0] - 20*mm
-    TEXT_W  = 150*mm   # colonne anomalie
-    FOUR_W  = 72*mm    # "Devis fournisseur demandé" (case + champ texte)
+    TEXT_W  = 160*mm   # colonne anomalie
+    FOUR_W  = 58*mm    # "Devis fournisseur demandé" (case + champ texte)
     CB_W    = page_content_w - TEXT_W - FOUR_W  # "Intégré dans le devis"
     # Largeur utile du widget dans la cellule (padding 4mm de chaque côté)
     FOUR_INNER = FOUR_W - 8*mm
@@ -1313,11 +1359,14 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                              alignment=1, textColor=colors.white, leading=10)
     summary_items = []
     # Ordre d'affichage des tendeurs/crochets : E > L > Crochet S > C
-    _TENDEUR_ORDER = ['Tendeur E (extensible)', 'Tendeur L (long)', 'Crochet S', 'Tendeur C (court)']
+    _TENDEUR_ORDER = ['Tendeur E (extensible)', 'Tendeur L (long)', 'Tendeur C (court)', 'Crochet S']
     for lbl in _TENDEUR_ORDER:
         if lbl in tcats: summary_items.append(fmt(lbl, tcats[lbl]))
     for lbl in sorted(tcats.keys()):
         if lbl not in _TENDEUR_ORDER: summary_items.append(fmt(lbl, tcats[lbl]))
+    # Bague de serrage (agrégée dans tcats)
+    if 'Ajout bague de serrage' in tcats:
+        summary_items.append(fmt('Ajout bague de serrage', tcats['Ajout bague de serrage']))
     # Panneaux consécutifs (PB -> PI -> PH) puis reste des cats
     _PANNEAU_ORDER = ['Panneau bas', 'Panneau intermédiaire', 'Panneau haut', 'Joint']
     for lbl in _PANNEAU_ORDER:
