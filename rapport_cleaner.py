@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.1"
+VERSION = "V0.3.6.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -126,6 +126,8 @@ def fix_word_breaks(text):
     _SUPERSCRIPTS = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹', '0123456789')
     text = text.translate(_SUPERSCRIPTS)
     text = re.sub(r'\r\n|\r', '\n', text)
+    # Préserver les sauts de ligne intentionnels (double \n = séparateur d'anomalies)
+    text = re.sub(r'\n\s*\n', ' §§ ', text)
     lines = text.split('\n')
     result = []; i = 0
     while i < len(lines):
@@ -173,6 +175,8 @@ def fix_word_breaks(text):
                                 result.append(line.rstrip()[:m.start()]+lw+pfx); i+=1; continue
         result.append(line); i+=1
     joined = re.sub(r' {2,}', ' ', ' '.join(result)).strip()
+    # Restaurer les séparateurs intentionnels
+    joined = joined.replace('§§', ' / ')
     # Post-processing : supprimer les fragments residuels (artefacts PDF 3 lignes)
     # Ex: 'asservissement ement hs' -> 'asservissement hs'  ('ement' = fin de 'asservissement')
     # Ex: 'remplacement ent /'     -> 'remplacement /'
@@ -317,6 +321,7 @@ def _propagate_hs(text):
     """Si le dernier segment contient HS, le propage aux segments précédents qui n'en ont pas.
     Ex: "Panneau bas + inter bas HS" → "Panneau bas HS + inter bas HS"
     Ne propage pas à travers un point (artefact ". HS" attaché à un segment non-HS).
+    Ne propage pas aux segments "rampe/non accessible" (constats sans anomalie).
     """
     if not text or not re.search(r'\bHS\b', text, re.IGNORECASE): return text
     # Supprimer les HS orphelins après un point : "en nacelle. HS +" → "en nacelle. +"
@@ -324,10 +329,11 @@ def _propagate_hs(text):
     segs = re.split(r'\s*\+\s*', text.strip())
     if len(segs) <= 1: return text
     if not re.search(r'\bHS\b', segs[-1], re.IGNORECASE): return text
+    _NO_PROPAGATE = re.compile(r'non\s+accessible|rampe\s+ressort|rampe\s+non', re.IGNORECASE)
     result = []
     for seg in segs:
         seg_s = seg.strip()
-        if seg_s and not re.search(r'\bHS\b', seg_s, re.IGNORECASE):
+        if seg_s and not re.search(r'\bHS\b', seg_s, re.IGNORECASE) and not _NO_PROPAGATE.search(seg_s):
             seg_s = seg_s + ' HS'
         result.append(seg_s)
     return ' + '.join(result)
@@ -365,7 +371,7 @@ def clean_cell(text, corrections=None, blacklist=None):
     t = re.sub(r'^[\s/\-,;.]+','',t); t = re.sub(r'[\s/\-,;.]+$','',t)
     t = re.sub(r' {2,}',' ',t).strip()
     # Strip word-level "vétuste/vetuste" (ex: "Sas vétuste" → "Sas" → vide → drop)
-    _VET_RE = re.compile(r'\bv[eé]tuste\b', re.IGNORECASE)
+    _VET_RE = re.compile(r'\bv[eé]tuste\b|\busure\b', re.IGNORECASE)
     if _VET_RE.search(t):
         t_stripped = _VET_RE.sub('', t).strip()
         t_stripped = re.sub(r'^[\s/\-,;.]+','',t_stripped).strip()
@@ -1109,7 +1115,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         m2=re.search(r'tendeurs?\s+([a-zA-Z])',seg); typ=m2.group(1).upper() if m2 else '?'
                     addt({'E':'Tendeur E (extensible)','L':'Tendeur L (long)','C':'Tendeur C (court)'}.get(typ,f'Tendeur {typ}'),n,q)
             else:
-                not_vetuste = not bool(re.search(r'\bvétuste\b|\bvetuste\b', fl))
+                not_vetuste = not bool(re.search(r'\bvétuste\b|\bvetuste\b|\busure\b', fl))
                 # Traitement segment par segment : chaque segment est testé contre les règles connues
                 # Les segments non reconnus tombent dans le bloc dynamique
                 # Cela évite que matched=True global fasse perdre des segments non reconnus
@@ -1266,7 +1272,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     # Ampoules : toutes variantes fusionnées par position int/ext
                     if re.search(r'\bampoule\b', sl) and not_vetuste:
                         if re.search(r'\bint[eé]r', sl): add('Ampoule feu rouge intérieur HS', n)
-                        elif re.search(r'\bext[eé]r', sl): add('Ampoule feu rouge extérieur HS', n)
+                        elif re.search(r'\bext[eé]r|\bext\b', sl): add('Ampoule feu rouge extérieur HS', n)
                         else: add('Ampoule HS', n)
                         seg_matched = True
                     # Bagues de serrage : agrégation avec quantité
@@ -1287,6 +1293,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         r'aimant\s+pour\s+retirer\s+les\s+cales',
                         r'pr[eé]voir\s+une?\s+p[aâ]te',
                         r'p[aâ]te\s+sur\s+la\s+porte',
+                        r'calematic',
+                        r'atalian\s+va\s+faire',
                     ]
                     if not seg_matched and any(re.search(p, sl, re.IGNORECASE) for p in _EXCLUDE_SUMMARY):
                         seg_matched = True
@@ -1380,11 +1388,22 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     for lbl in sorted(tcats.keys()):
         if lbl not in _TENDEUR_ORDER: summary_items.append(fmt(lbl, tcats[lbl]))
     # Panneaux consécutifs (PB -> PI -> PH) puis reste des cats
-    _PANNEAU_ORDER = ['Panneau bas', 'Panneau intermédiaire', 'Panneau haut', 'Joint']
-    for lbl in _PANNEAU_ORDER:
-        if lbl in cats: summary_items.append(fmt(lbl, cats[lbl]))
-    for c, d in cats.items():
-        if c not in _PANNEAU_ORDER: summary_items.append(fmt(c, d))
+    def _group_key(lbl):
+        ll = lbl.lower()
+        if 'bague' in ll: return (1, 'a', lbl)
+        if 'panneau bas' in ll or 'profil & joint bas' in ll or 'joint bas' in ll or 'profil panneau bas' in ll: return (2, 'a', lbl)
+        if 'panneau inter' in ll: return (2, 'b', lbl)
+        if 'panneau haut' in ll: return (2, 'c', lbl)
+        if 'joint' in ll and 'profil' in ll: return (3, 'a', lbl)
+        if 'profil' in ll: return (3, 'b', lbl)
+        if 'joint' in ll: return (3, 'c', lbl)
+        if 'ampoule' in ll: return (4, 'a', lbl)
+        if 'butée' in ll or 'butee' in ll: return (5, 'a', lbl)
+        if 'bavette' in ll: return (6, 'a', lbl)
+        if 'soudure' in ll: return (7, 'a', lbl)
+        return (10, 'z', lbl)
+    for c, d in sorted(cats.items(), key=lambda x: _group_key(x[0])):
+        summary_items.append(fmt(c, d))
     if summary_items:
         tbl_data = [[
             Paragraph('', ns),
@@ -1467,6 +1486,8 @@ def do_update(download_url, log_fn=None):
             ":do_update",
             "timeout /t 2 /nobreak >nul",
         ]
+        if mei_path:
+            bat_lines += [f'rmdir /s /q "{mei_path}" 2>nul']
         bat_lines += [
             f'move /y "{tmp_exe}" "{exe_path}"',
             f'start "" /d "{exe_dir}" "{exe_path}" {UPDATER_FLAG}',
