@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.3.1"
+VERSION = "V0.3.6.4"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -162,6 +162,11 @@ def fix_word_breaks(text):
                             lines[i+1] = rest
                             result.append(line.rstrip()); i+=1; continue
                         # Suffixe non-isole : fusionner le prefixe, reinjecter le reste
+                        # Ne pas fusionner si pfx commence par une majuscule (≥2 chars) :
+                        # c'est le début d'un nouvel élément, pas une coupure de mot
+                        # Ex: "HS\nChoc PB + PI" → ne pas produire "HSChoc PB + PI"
+                        if len(pfx) >= 2 and pfx[0].isupper():
+                            result.append(line); i+=1; continue
                         if pfx.lower() not in NEVER_SUFFIX:
                             if len(pfx) == 1 and pfx.lower() not in {'s','x','e','é'}:
                                 # Exception : "r" après voyelle finale reconstruit -eur/-ier/-oir
@@ -212,9 +217,11 @@ def strip_choc(text):
     # Tagguer chaque segment : True = issu d'un segment choc, False = segment non-choc à préserver
     segs = re.split(r'\s*\+\s*', t)
     kept_tagged = []
+    prev_was_choc = False  # tracker indépendant pour détecter segment choc même si résidu vide
     for seg in segs:
         seg_s = seg.strip()
         if re.match(r'^(?:léger\s+)?choc\b', seg_s, re.IGNORECASE):
+            prev_was_choc = True
             if re.search(r'\bHS\b', seg_s, re.IGNORECASE):
                 kept_tagged.append((True, seg_s))
             else:
@@ -223,7 +230,14 @@ def strip_choc(text):
                 if residual:
                     kept_tagged.append((True, residual))
         else:
-            kept_tagged.append((False, seg_s))
+            seg_s_clean = seg_s
+            # Si le segment précédent était un segment-choc, supprimer le préfixe pb/pi/ph
+            # orphelin en tête (ex: "Choc PB + PI Suspente..." → après split, "PI Suspente...")
+            if prev_was_choc:
+                seg_s_clean = re.sub(r'^(?:pb|pi|ph)\s+', '', seg_s_clean, flags=re.IGNORECASE).strip()
+            # Si CE segment contient "choc" (milieu), le suivant peut aussi avoir un préfixe orphelin
+            prev_was_choc = bool(re.search(r'\bchoc\b', seg_s, re.IGNORECASE))
+            kept_tagged.append((False, seg_s_clean))
     # Étape 2 : appliquer nettoyage UNIQUEMENT aux segments choc-dérivés
     _CLEANUP_PATS = [
         r'\b\d{3,4}x\d{3,4}(?:x\d+)?\b', r'\bx\d+\b(?!\s*cm)',
@@ -232,7 +246,7 @@ def strip_choc(text):
         r'\bet\s+(?:intérieur|extérieur)\s+\w+\b',
         r'\b\d+\s*x\b(?!\s*\d)',
         r'\b(?:extérieur|intérieur|exterieur|interieur)\s*(?:et\s*)?$',
-        r'\b(?:inter|panneau|bas|léger|leger|droite|gauche)\b',
+        r'\b(?:inter|panneau|bas|haut|léger|leger|droite|gauche)\b',  # + haut (point 3)
         r'\bpoutre\s+avant\b',
     ]
     result_parts = []
@@ -250,6 +264,7 @@ def strip_choc(text):
             p = re.sub(r' {2,}', ' ', p).strip()
             if p: result_parts.append(p)
         elif re.search(r'\bchoc\b', part, re.IGNORECASE):
+            prev_was_choc = True  # le segment suivant peut avoir un préfixe pb/pi/ph orphelin
             # Choc au milieu du segment : supprimer la description choc + résidus
             # Après split sur +, ce segment ne contient jamais profil/joint → _CLEANUP_PATS safe
             p = choc_re.sub('', part)
@@ -1171,11 +1186,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     else:
                         segments_full.append(raw_seg)
 
-                has_bavette_flexible = False
-
-                # Passe 1 : détecter has_bavette_flexible sur la cellule entière (nécessaire pour éviter doublon bavette)
-                if 'flexible' in fl and not_vetuste:
-                    has_bavette_flexible = bool(re.search(r'\b(?:bavette|lèvre|levre)\b', fl))
+                has_bavette_flexible = False  # non utilisé, conservé pour compatibilité
 
                 _EFF_SUM = re.compile(r'[eé]ff?ectu[eé]e?', re.IGNORECASE)
                 _SEP_SUM = re.compile(r'\s*/\s*|\s*\+\s*')
@@ -1270,7 +1281,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                             if has_support: add('Support butée HS', n, eq(sl))
                             else: add('Butée HS', n, eq(sl))
                             seg_matched = True
-                    if 'bavette' in sl and not_vetuste and not has_bavette_flexible:
+                    if 'bavette' in sl and not_vetuste and 'flexible' not in sl:
                         if re.search(r'\btordu[e]?\b|d[eé]form[eé][e]?', sl):
                             add('Bavette tordue', n)
                         else:
@@ -1342,13 +1353,22 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                             (r'pas\s+d.accès\s+nacelle|pas\s+d.acces\s+nacelle|prévoir\s+une\s+nacelle|prevoir\s+une\s+nacelle', 'Nacelle requise'),
                             (r'besoin\s+d.un\s+chariot|chariot\b.{0,20}\bquai', 'Chariot nécessaire'),
                             (r'\bgalet[s]?\b.{0,20}\b(long[s]?|remplacer|remplacé|hs)', 'Galets à remplacer'),
+                            (r'coffret\s+de\s+commande', 'Coffret de commande à remplacer'),  # normalise tous les variants
                         ]
-                        if label and len(label) > 40:
+                        _PROBLEM_INDICATOR = re.compile(
+                            r'\bhs\b|cass[eé]e?|tordu[e]?|manque|manquant[e]?|absent[e]?|'
+                            r'fuite|d[eé]faut|urgent|urgence|'
+                            r'[àa]\s+remplacer|[àa]\s+refaire|[àa]\s+replacer|[àa]\s+changer|'
+                            r'd[eé]tach|d[eé]form|bris[eé]e?|rompu[e]?|bloqu[eé]e?|'
+                            r'manquante|soudure|remplacement',
+                            re.IGNORECASE
+                        )
+                        if label:
                             for pat, short_lbl in _SHORT_PATTERNS:
                                 if re.search(pat, sl, re.IGNORECASE):
                                     label = short_lbl
                                     break
-                        if label: add(label, n)
+                        if label and _PROBLEM_INDICATOR.search(label): add(label, n)
     def fmt(lbl,d):
         tot=sum(d.values()); parts=[f"{k} ({q})" if q>1 else k for k,q in d.items()]
         return f"<b>{lbl}</b> ({tot}) : {', '.join(parts)}"
