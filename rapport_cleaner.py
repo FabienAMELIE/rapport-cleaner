@@ -22,10 +22,89 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.4"
+VERSION = "V0.3.6.5"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
+
+# ── Installation AppData (--onedir) ───────────────────────────────────────────
+# Chemin d'installation fixe : %APPDATA%\LoadingSystems\RapportCleaner\
+_APPDATA = os.environ.get('APPDATA', os.path.expanduser('~'))
+INSTALL_DIR  = os.path.join(_APPDATA, 'LoadingSystems', 'RapportCleaner')
+INSTALL_EXE  = os.path.join(INSTALL_DIR, GITHUB_EXE_NAME)
+IS_FROZEN    = getattr(sys, 'frozen', False)  # False en mode dev
+
+def _is_installed():
+    """Vérifie si l'exe courant tourne depuis INSTALL_DIR."""
+    if not IS_FROZEN:
+        return True  # mode dev : on saute l'installation
+    current = os.path.normcase(os.path.dirname(os.path.abspath(sys.executable)))
+    target  = os.path.normcase(INSTALL_DIR)
+    return current == target
+
+def _get_desktop():
+    """Retourne le chemin du Bureau Windows (gère les locales FR/EN)."""
+    try:
+        import subprocess as _sp
+        r = _sp.run(['powershell', '-WindowStyle', 'Hidden', '-Command',
+                     '[Environment]::GetFolderPath("Desktop")'],
+                    capture_output=True, text=True, timeout=5)
+        d = r.stdout.strip()
+        if d and os.path.isdir(d):
+            return d
+    except Exception:
+        pass
+    # Fallback
+    for name in ('Desktop', 'Bureau'):
+        d = os.path.join(os.path.expanduser('~'), name)
+        if os.path.isdir(d):
+            return d
+    return os.path.expanduser('~')
+
+def _create_shortcut(exe_path):
+    """Crée un raccourci .lnk sur le Bureau via PowerShell (pas de dépendance win32com)."""
+    desktop = _get_desktop()
+    lnk = os.path.join(desktop, 'RapportCleaner.lnk')
+    ps = (
+        f'$s=(New-Object -COM WScript.Shell).CreateShortcut("{lnk}");'
+        f'$s.TargetPath="{exe_path}";'
+        f'$s.WorkingDirectory="{os.path.dirname(exe_path)}";'
+        f'$s.IconLocation="{exe_path}";'
+        f'$s.Save()'
+    )
+    try:
+        import subprocess as _sp
+        _sp.run(['powershell', '-WindowStyle', 'Hidden', '-Command', ps],
+                capture_output=True, timeout=10)
+    except Exception:
+        pass
+    return os.path.exists(lnk)
+
+def install_to_appdata():
+    """Copie le dossier --onedir vers INSTALL_DIR et crée le raccourci Bureau.
+    Appelé au premier lancement depuis un dossier autre qu'INSTALL_DIR.
+    NOTE (V0.3.6.5 — test) : mécanisme à valider en conditions réelles.
+    """
+    import shutil
+    src_dir = os.path.dirname(os.path.abspath(sys.executable))
+    try:
+        # Supprimer l'ancienne installation si elle existe
+        if os.path.exists(INSTALL_DIR):
+            shutil.rmtree(INSTALL_DIR)
+        shutil.copytree(src_dir, INSTALL_DIR)
+        shortcut_ok = _create_shortcut(INSTALL_EXE)
+        msg = (
+            f"RapportCleaner {VERSION} a été installé.\n\n"
+            + ("Un raccourci a été créé sur votre Bureau.\n\n" if shortcut_ok else "")
+            + "Relancez l'application depuis le raccourci Bureau."
+        )
+        import tkinter.messagebox as _mb
+        _mb.showinfo("Installation réussie", msg)
+    except Exception as e:
+        import tkinter.messagebox as _mb
+        _mb.showerror("Erreur d'installation", f"Impossible d'installer :\n{e}")
+    finally:
+        sys.exit(0)
 
 def resource_path(filename):
     """Retourne le chemin absolu vers une ressource (compatible PyInstaller)."""
@@ -1484,6 +1563,7 @@ def check_latest_version():
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
         tag = data.get("tag_name", "")
+        # En --onedir, on télécharge uniquement le .exe (pas le zip complet)
         for asset in data.get("assets", []):
             if asset.get("name") == GITHUB_EXE_NAME:
                 return tag, asset["browser_download_url"]
@@ -1492,13 +1572,13 @@ def check_latest_version():
         return None, None
 
 def do_update(download_url, log_fn=None):
-    """Nouveau mécanisme MAJ sans race condition Defender :
-    1. Télécharge le nouvel exe dans le même dossier que l'exe courant
+    """Mécanisme MAJ --onedir :
+    1. Télécharge le nouvel exe dans INSTALL_DIR
     2. Renomme l'ancien exe en _old (Windows autorise rename d'un exe en cours)
     3. Place le nouvel exe au bon emplacement
-    4. Ferme l'app avec compte à rebours (Defender a le temps de scanner)
-    5. L'utilisateur relance → nouvel exe déjà scanné → pas de DLL error
-    6. Au prochain démarrage, _old est supprimé
+    4. Relance immédiatement (pas de _MEI → pas de conflit Defender)
+    5. Au prochain démarrage, _old est supprimé
+    NOTE (V0.3.6.5 — test) : auto-relaunch à valider en conditions réelles.
     """
     def log(msg):
         if log_fn: log_fn(msg)
@@ -1520,20 +1600,26 @@ def do_update(download_url, log_fn=None):
         os.rename(exe_path, old_path)
         # Placer le nouvel exe
         os.rename(new_tmp, exe_path)
-        log("Mise à jour prête. L'application va se fermer...")
+        log("Mise à jour installée. Redémarrage...")
 
-        # Fermer avec compte à rebours via Tkinter
-        import time
-        def _countdown_and_close():
+        # Relancer le nouvel exe puis fermer — pas de délai nécessaire (pas de _MEI)
+        def _relaunch_and_close():
+            import time
+            time.sleep(1)  # 1s pour laisser le message s'afficher
+            try:
+                subprocess.Popen([exe_path, UPDATER_FLAG],
+                                 creationflags=subprocess.DETACH_PROCESS
+                                 if hasattr(subprocess, 'DETACH_PROCESS') else 0)
+            except Exception:
+                pass
             import tkinter as _tk
-            if not _tk._default_root: os._exit(0)
             root = _tk._default_root
-            for i in range(5, 0, -1):
-                log(f"Fermeture dans {i} seconde{'s' if i>1 else ''}...")
-                time.sleep(1)
-            root.after(0, root.destroy)
+            if root:
+                root.after(0, root.destroy)
+            else:
+                os._exit(0)
         import threading
-        threading.Thread(target=_countdown_and_close, daemon=True).start()
+        threading.Thread(target=_relaunch_and_close, daemon=True).start()
 
     except Exception as e:
         log(f"Erreur mise à jour : {e}")
@@ -2231,6 +2317,15 @@ class App(_AppBase):
             self.progress['value'] = value
 
 if __name__ == '__main__':
+    # ── Premier lancement hors AppData → installation automatique ────────────
+    # (V0.3.6.5 — test : mécanisme à valider en conditions réelles)
+    if IS_FROZEN and not _is_installed():
+        # Tkinter minimal pour les boîtes de dialogue d'installation
+        import tkinter as _tk_inst
+        _root_inst = _tk_inst.Tk()
+        _root_inst.withdraw()
+        install_to_appdata()  # affiche dialog + sys.exit()
+
     # Nettoyage de l'ancien exe _old laissé par une mise à jour précédente
     try:
         _exe = os.path.abspath(sys.executable)
