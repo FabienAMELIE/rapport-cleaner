@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.4.1"
+VERSION = "V0.3.6.4.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -375,8 +375,10 @@ def _propagate_hs(text):
 def clean_cell(text, corrections=None, blacklist=None):
     if not text: return ''
     t = fix_word_breaks(text)
-    # Normaliser les '+' sans espaces (ex: 'ChocPB+PI' apres fix_fused_words → 'Choc PB+PI' → 'Choc PB + PI')
+    # Normaliser les '+' sans espaces
     t = re.sub(r'(?<=[^\s])\+(?=[^\s])', ' + ', t)
+    # Normaliser les '/' sans espaces → ' / ' (ex: "hs/1long" → "hs / 1long")
+    t = re.sub(r'\s*/\s*', ' / ', t)
     t = fix_fused_words(t)
     t = strip_choc(t)                              # passe 1 : avant corrections
     if corrections: t = apply_corrections(t, corrections)
@@ -815,6 +817,30 @@ def _read_standard(pdf_path, structure, corrections, blacklist):
                 rows_data.append((len(rows_data), n) + tuple(fields))
     return rows_data
 
+def _extract_sublabel(nom):
+    """Extrait le sous-label client/site depuis le champ Nom.
+    Stratégie : après le premier nombre standalone dans le nom, tout ce qui reste
+    (nettoyé des mots-clés techniques) devient le sous-label.
+    Ex: "Porte sectionnelle motorisé horman 2 exertis connect" → "exertis connect"
+    Ex: "Porte local poubelle" (sans numéro) → "local poubelle"
+    """
+    # Mots techniques à ignorer dans le sous-label
+    _TECH = re.compile(
+        r'\b(?:porte\s+section\w*|porte|niveleur|sas|motoris[eé]|horman|'
+        r'bavette\s+pivotant\w*|sectionnell\w*|ramp\w*)\b',
+        re.IGNORECASE
+    )
+    nom_clean = _TECH.sub('', nom).strip()
+    # Trouver le premier nombre standalone
+    m = re.search(r'\b(\d+)\b', nom_clean)
+    if m:
+        after = nom_clean[m.end():].strip(' .,;-')
+        if after:
+            return after.strip()
+        return ''
+    # Pas de numéro → tout le nom nettoyé est le sous-label
+    return nom_clean.strip(' .,;-') if nom_clean.strip() else ''
+
 def _read_nom_commentaire(pdf_path, corrections, blacklist):
     quais = {}
     with pdfplumber.open(pdf_path) as pdf:
@@ -826,39 +852,48 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
                 serie = row[0].strip()
                 nom = fix_word_breaks(row[1]) if row[1] else ''
                 com = clean_cell(fix_word_breaks(row[2]) if row[2] else '', corrections, blacklist)
+                sublabel = _extract_sublabel(nom)
                 if re.search(r'porte\s+section', nom, re.IGNORECASE):
-                    # Cherche le N° de quai : fin du nom ("horman 2"), début ("24 porte..."), ou abloy/assa
                     m = re.search(r'(?:abloy|assa)\s+(\d+)', nom, re.IGNORECASE) or \
                         re.search(r'(\d+)\s*$', nom) or \
                         re.search(r'^(\d+)\b', nom) or \
-                        re.search(r'\b(\d+)\b', nom)  # fallback : 1er nombre standalone dans le nom
-                    if m: quais.setdefault(int(m.group(1)),{})['porte']=(serie,com)
+                        re.search(r'\b(\d+)\b', nom)
+                    if m:
+                        q = quais.setdefault(int(m.group(1)),{})
+                        q['porte'] = (serie, com)
+                        if sublabel and 'sublabel' not in q:
+                            q['sublabel'] = sublabel
                 elif re.search(r'niveleur', nom, re.IGNORECASE):
-                    # ^(\d+) évite de matcher le modèle en fin ("2 Niveleur 232" → 2, pas 232)
-                    # (\d+)\s*$ : fallback quai en fin de nom ("Niveleur bavette pivotant 8" → 8)
                     m = re.search(r':\s*(\d+)', nom) or \
                         re.search(r'^(\d+)\b', nom) or \
                         re.search(r'(\d+)\s*$', nom) or \
-                        re.search(r'\b(\d+)\b', nom)  # fallback : 1er nombre standalone dans le nom
-                    if m: quais.setdefault(int(m.group(1)),{})['niv']=(serie,com)
+                        re.search(r'\b(\d+)\b', nom)
+                    if m:
+                        q = quais.setdefault(int(m.group(1)),{})
+                        q['niv'] = (serie, com)
+                        if sublabel and 'sublabel' not in q:
+                            q['sublabel'] = sublabel
                 elif re.search(r'\bsas\b', nom, re.IGNORECASE):
-                    # ^(\d+) évite de matcher les dims en fin ("2 Sas 403 ... bande jaune" → 2)
-                    # (\d+)\s*$ : fallback quai en fin de nom ("Sas d'étanchéité 8" → 8)
                     m = re.search(r'(?:abloy)\s+(\d+)', nom, re.IGNORECASE) or \
                         re.search(r'^(\d+)\b', nom) or \
                         re.search(r'(\d+)\s*$', nom) or \
-                        re.search(r'\b(\d+)\b', nom)  # fallback : 1er nombre standalone dans le nom
-                    if m: quais.setdefault(int(m.group(1)),{})['sas']=(serie,com)
+                        re.search(r'\b(\d+)\b', nom)
+                    if m:
+                        q = quais.setdefault(int(m.group(1)),{})
+                        q['sas'] = (serie, com)
+                        if sublabel and 'sublabel' not in q:
+                            q['sublabel'] = sublabel
     rows_data = []
     for qn in sorted(quais.keys()):
         d = quais[qn]
-        # Tuple aligné sur col_order = ['porte','rapide','niv','sas','but','rideau','cale','chandelle']
+        sublabel = d.get('sublabel', '')
         rows_data.append((qn, str(qn),
-                          d.get('porte',('',''))[1],  # porte
-                          '',                          # rapide (non utilisé en nom_commentaire)
-                          d.get('niv',  ('',''))[1],  # niv
-                          d.get('sas',  ('',''))[1],  # sas
-                          '', '', '', ''))             # but, rideau, cale, chandelle
+                          d.get('porte',('',''))[1],
+                          '',
+                          d.get('niv',  ('',''))[1],
+                          d.get('sas',  ('',''))[1],
+                          '', '', '', '',
+                          sublabel))  # sous-label en position 10
     return rows_data, quais
 
 def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
@@ -921,7 +956,23 @@ def _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log):
             imgs = img_map.get(n,[])
         img_cells = [make_img(imgs[i],img_dir) if i<len(imgs) else '' for i in range(N_PHOTOS)]
         data_cells = [make_cell(f,bold=bool(f),size=7.5) for f in active_fields]
-        table_data.append([make_cell(n,bold=True,size=7.5)]+data_cells+img_cells)
+
+        # Sous-label client/site (mode nom_commentaire uniquement)
+        sublabel = row[10] if style == 'nom_commentaire' and len(row) > 10 else ''
+        if sublabel:
+            n_cell = make_cell(f'{n}\n{sublabel}', bold=True, size=7.5)
+            # Remettre le sous-label en plus petit et italique via Paragraph
+            from reportlab.platypus import Paragraph
+            from reportlab.lib.styles import ParagraphStyle
+            _n_style = ParagraphStyle('ncell', fontName='Helvetica-Bold', fontSize=7.5,
+                                      alignment=1, leading=10)
+            _sub_style = ParagraphStyle('subcell', fontName='Helvetica-Oblique', fontSize=6,
+                                        alignment=1, leading=8, textColor=colors.HexColor('#666666'))
+            n_cell = [Paragraph(n, _n_style), Paragraph(sublabel, _sub_style)]
+        else:
+            n_cell = make_cell(n, bold=True, size=7.5)
+
+        table_data.append([n_cell]+data_cells+img_cells)
         idx=len(table_data)-1
         style_cmds.append(('BACKGROUND',(0,idx),(-1,idx),colors.HexColor('#f2f2f2') if alt%2==0 else colors.white))
         style_cmds.append(('ROWHEIGHT',(0,idx),(-1,idx),21*mm if imgs else 7*mm))
@@ -1100,6 +1151,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     _label_canon = {}  # normalized_key -> canonical display label
     def _norm_label(lbl):
         import unicodedata
+        # Normalise cassé/cassée → hs pour fusionner les labels
+        lbl = re.sub(r'\bcass[eé]e?\b', 'hs', lbl, flags=re.IGNORECASE)
         nfd = unicodedata.normalize('NFD', lbl.lower())
         return ''.join(c for c in nfd if not unicodedata.combining(c))
     def add(c,n,q=1):
@@ -1494,49 +1547,58 @@ def check_latest_version():
     except Exception:
         return None, None
 
-def do_update(download_url, log_fn=None):
-    """Nouveau mécanisme MAJ sans race condition Defender :
-    1. Télécharge le nouvel exe dans le même dossier que l'exe courant
-    2. Renomme l'ancien exe en _old (Windows autorise rename d'un exe en cours)
-    3. Place le nouvel exe au bon emplacement
-    4. Ferme l'app avec compte à rebours (Defender a le temps de scanner)
-    5. L'utilisateur relance → nouvel exe déjà scanné → pas de DLL error
-    6. Au prochain démarrage, _old est supprimé
+def do_update(download_url, progress_fn=None, log_fn=None):
+    """MAJ intégrée dans la barre de progression :
+    0→90%  : téléchargement (progression réelle)
+    90→95% : renommage ancien exe
+    95→100%: placement nouvel exe
+    100%   : auto-relaunch + fermeture
+    Au prochain démarrage, _old.exe est supprimé.
+    ⚠️ auto-relaunch à tester SentinelOne (V0.3.6.4.2)
     """
     def log(msg):
         if log_fn: log_fn(msg)
+    def prog(v):
+        if progress_fn: progress_fn(v)
     try:
+        import time
         exe_path = os.path.abspath(sys.executable)
         exe_dir  = os.path.dirname(exe_path)
         exe_name = os.path.basename(exe_path)
         old_path = os.path.join(exe_dir, exe_name.replace('.exe', '_old.exe'))
         new_tmp  = os.path.join(exe_dir, exe_name.replace('.exe', '_update.exe'))
 
-        log("Téléchargement en cours...")
-        urllib.request.urlretrieve(download_url, new_tmp)
-        log("Téléchargement terminé. Installation...")
+        # ── Téléchargement 0→90% ──────────────────────────────────────────────
+        def _reporthook(block, block_size, total):
+            if total > 0:
+                pct = min(int(block * block_size / total * 90), 90)
+                prog(pct)
+        urllib.request.urlretrieve(download_url, new_tmp, reporthook=_reporthook)
+        prog(90)
 
-        # Renommer l'ancien exe en _old (possible même si en cours d'exécution)
+        # ── Renommage 90→95% ─────────────────────────────────────────────────
         if os.path.exists(old_path):
             try: os.remove(old_path)
             except: pass
         os.rename(exe_path, old_path)
-        # Placer le nouvel exe
-        os.rename(new_tmp, exe_path)
-        log("Mise à jour prête. L'application va se fermer...")
+        prog(95)
 
-        # Fermer avec compte à rebours via Tkinter
-        import time
-        def _countdown_and_close():
-            import tkinter as _tk
-            if not _tk._default_root: os._exit(0)
-            root = _tk._default_root
-            for i in range(2, 0, -1):
-                log(f"Fermeture dans {i} seconde{'s' if i>1 else ''}...")
-                time.sleep(1)
+        # ── Placement 95→100% ────────────────────────────────────────────────
+        os.rename(new_tmp, exe_path)
+        prog(100)
+
+        # ── Auto-relaunch + fermeture ─────────────────────────────────────────
+        time.sleep(0.8)  # laisser voir la barre verte
+        try:
+            subprocess.Popen([exe_path, UPDATER_FLAG])
+        except Exception:
+            pass  # si le relaunch échoue, l'utilisateur relance manuellement
+        import tkinter as _tk
+        root = _tk._default_root
+        if root:
             root.after(0, root.destroy)
-        import threading
-        threading.Thread(target=_countdown_and_close, daemon=True).start()
+        else:
+            os._exit(0)
 
     except Exception as e:
         log(f"Erreur mise à jour : {e}")
@@ -1793,26 +1855,43 @@ class SettingsWindow(tk.Toplevel):
         prog_win.resizable(False, False)
         prog_win.grab_set()
         prog_win.attributes('-topmost', True)
-        prog_win.protocol("WM_DELETE_WINDOW", lambda: None)  # empêche la fermeture manuelle
-        pw, ph = 380, 110
+        prog_win.protocol("WM_DELETE_WINDOW", lambda: None)
+        pw, ph = 380, 100
         self.update_idletasks()
         sx = self.winfo_x() + (self.winfo_width()  - pw) // 2
         sy = self.winfo_y() + (self.winfo_height() - ph) // 2
         prog_win.geometry(f"{pw}x{ph}+{sx}+{sy}")
 
-        prog_lbl = tk.Label(prog_win, text="Téléchargement en cours...",
-                            bg=C_BG, fg=C_TEXT, font=('Helvetica', 9))
-        prog_lbl.pack(pady=(18, 6))
-        prog_bar = ttk.Progressbar(prog_win, mode='indeterminate', length=320)
-        prog_bar.pack(pady=(0, 14))
-        prog_bar.start(12)
+        prog_bar_var = tk.IntVar(value=0)
+        prog_bar = ttk.Progressbar(prog_win, mode='determinate',
+                                   variable=prog_bar_var, maximum=100, length=340)
+        prog_bar.pack(pady=(22, 8), padx=20)
+        prog_lbl = tk.Label(prog_win, text="Téléchargement...",
+                            bg=C_BG, fg=C_TEXT2, font=('Helvetica', 8))
+        prog_lbl.pack()
 
-        def _set_msg(msg):
-            prog_lbl.config(text=msg)
+        def _set_progress(v):
+            prog_bar_var.set(v)
+            if v < 90:
+                prog_lbl.config(text=f"Téléchargement... {v}%")
+            elif v < 95:
+                prog_lbl.config(text="Renommage...")
+            elif v < 100:
+                prog_lbl.config(text="Installation...")
+            else:
+                prog_bar.config(style='green.Horizontal.TProgressbar')
+                prog_lbl.config(text="Mise à jour installée ✓")
+            prog_win.update_idletasks()
+
+        # Style barre verte pour la complétion
+        _s = ttk.Style()
+        _s.configure('green.Horizontal.TProgressbar',
+                     troughcolor=C_PANEL, background='#2ecc71')
 
         def worker():
             do_update(self._upd_download_url,
-                      log_fn=lambda m: self.after(0, lambda msg=m: _set_msg(msg)))
+                      progress_fn=lambda v: self.after(0, lambda val=v: _set_progress(val)),
+                      log_fn=None)
         threading.Thread(target=worker, daemon=True).start()
 
     def _save(self):
