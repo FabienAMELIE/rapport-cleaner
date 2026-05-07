@@ -3,7 +3,7 @@ Rapport Cleaner — Loading Systems
 Nettoie automatiquement les rapports d'intervention PDF de techniciens.
 """
 
-import os, re, sys, json, threading, tempfile, urllib.request, urllib.error, subprocess
+import os, re, sys, json, threading, tempfile, urllib.request, urllib.error, subprocess, random
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 # Drag & drop : tkinterdnd2 pour supporter le glisser-déposer de fichiers
@@ -22,8 +22,31 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.4.2"
+VERSION = "V0.3.6.4.3"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
+
+# ── Phrases rigolotes du journal ──────────────────────────────────────────────
+_FUNNY_LINES = [
+    "Aucun panneau bas n'a été choqué lors de la génération de ce rapport...",
+    "Obtention du numéro de Romana, à des fins professionnelles... évidemment...",
+    "Versement du café d'Abdarrahime...",
+    "Vérification que Laetitia ne soit pas énervée...",
+    "Pause obligatoire pour goûter les gâteaux de Nicha...",
+    "Installation des Bethouart de quais...",
+    "Mise en relation avec la police municipale...",
+    "Recalibration des girafes en mode paysage...",
+    "Tentative de déchiffrage des éléments du rapport...",
+    "Écoute de la 467ème fois où Gurvan vante les qualités de la Bretagne...",
+    "Vérification que l'usine ne s'est pas encore trompée dans les commandes...",
+    "Organisation d'une réunion commerciale interminable...",
+    "Pourquoi tu lis ça ??...",
+    "Demande à Cyril pour avoir les références...",
+]
+
+def _get_funny_lines():
+    """Retourne 1 ou 2 phrases rigolotes tirées aléatoirement."""
+    k = random.randint(1, 2)
+    return random.sample(_FUNNY_LINES, k)
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
 
@@ -725,6 +748,10 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
 
     progress(85)
     log("Génération du PDF...")
+    # Phrases rigolotes glissées dans le journal
+    funny = _get_funny_lines()
+    for f in funny:
+        log(f)
     _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log)
     log(f"✓ PDF généré : {output_path}")
 
@@ -1156,6 +1183,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         nfd = unicodedata.normalize('NFD', lbl.lower())
         return ''.join(c for c in nfd if not unicodedata.combining(c))
     def add(c,n,q=1):
+        # Normaliser cassé/cassée → hs dans le label affiché aussi
+        c = re.sub(r'\bcass[eé]e?\b', 'hs', c, flags=re.IGNORECASE)
         nk = _norm_label(c)
         if nk not in _label_canon: _label_canon[nk] = c
         can = _label_canon[nk]
@@ -1410,6 +1439,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                             (r'besoin\s+d.un\s+chariot|chariot\b.{0,20}\bquai', 'Chariot nécessaire'),
                             (r'\bgalet[s]?\b.{0,20}\b(long[s]?|remplacer|remplacé|hs)', 'Galets à remplacer'),
                             (r'coffret\s+de\s+commande', 'Coffret de commande à remplacer'),  # normalise tous les variants
+                            (r'b[aâ]che?\s+p[eé]riph[eé]r', 'Bâche périphérique HS'),
+                            (r'b[aâ]che?\s+lat[eé]r', 'Bâche latérale HS'),
                         ]
                         _PROBLEM_INDICATOR = re.compile(
                             r'\bhs\b|cass[eé]e?|tordu[e]?|manque|manquant[e]?|absent[e]?|'
@@ -1433,6 +1464,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
 
     # Logo en haut à droite
     story = []
+    story.append(Spacer(1, 6*mm))  # marge supérieure : centre visuellement titre/logo
     logo_path = resource_path('LS_LOGO_HOR_RGB_TRANSPARANT.png')
     if os.path.exists(logo_path):
         try:
@@ -2131,6 +2163,13 @@ class App(_AppBase):
         if self.pdf_path.get() and self.out_path.get():
             self.btn_run.config(state='normal')
 
+    def _open_pdf(self, path):
+        """Ouvre le PDF généré avec le lecteur par défaut."""
+        try:
+            os.startfile(path)
+        except Exception:
+            pass  # si l'ouverture échoue, on ne bloque pas
+
     def _log(self, msg):
         self.log_box.config(state='normal')
         self.log_box.insert('end', msg+'\n')
@@ -2280,7 +2319,7 @@ class App(_AppBase):
                     log_fn=lambda m: self.after(0,lambda msg=m: self._log(msg)),
                     progress_fn=lambda v: self.after(0,lambda val=v: self._set_progress(val)))
                 self.after(0,lambda: self._set_progress(100, done=True))
-                self.after(0,lambda: messagebox.showinfo("Terminé ✓",f"PDF généré avec succès !\n\n{out}"))
+                self.after(0,lambda o=out: self._open_pdf(o))
             except PermissionError:
                 def _ask_retry(p=pdf, o=out, s=structure):
                     if messagebox.askretrycancel(
