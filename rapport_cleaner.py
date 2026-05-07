@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.4.3"
+VERSION = "V0.3.6.4.4"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
@@ -1624,13 +1624,8 @@ def do_update(download_url, progress_fn=None, log_fn=None):
         try:
             subprocess.Popen([exe_path, UPDATER_FLAG])
         except Exception:
-            pass  # si le relaunch échoue, l'utilisateur relance manuellement
-        import tkinter as _tk
-        root = _tk._default_root
-        if root:
-            root.after(0, root.destroy)
-        else:
-            os._exit(0)
+            pass
+        os._exit(0)  # sortie forcée : court-circuite le nettoyage _MEI de PyInstaller → pas de warning
 
     except Exception as e:
         log(f"Erreur mise à jour : {e}")
@@ -2352,12 +2347,22 @@ class App(_AppBase):
             self.progress['value'] = value
 
 if __name__ == '__main__':
-    # Nettoyage de l'ancien exe _old laissé par une mise à jour précédente
+    # Nettoyage de l'ancien exe _old laissé par une mise à jour précédente.
+    # Lancé en thread avec retries car l'ancien exe peut encore être en cours de fermeture.
     try:
         _exe = os.path.abspath(sys.executable)
         _old = _exe.replace('.exe', '_old.exe')
         if os.path.exists(_old):
-            os.remove(_old)
+            def _cleanup_old(_p=_old):
+                import time as _t
+                for _ in range(10):
+                    _t.sleep(1)
+                    try:
+                        if os.path.exists(_p):
+                            os.remove(_p)
+                            break
+                    except: pass
+            threading.Thread(target=_cleanup_old, daemon=True).start()
     except: pass
     app = App()
     if UPDATER_FLAG in sys.argv:
