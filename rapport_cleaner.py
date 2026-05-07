@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.4"
+VERSION = "V0.3.6.4.1"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 GITHUB_EXE_NAME = "RapportCleaner.exe"
 UPDATER_FLAG = "--updated"
@@ -830,21 +830,24 @@ def _read_nom_commentaire(pdf_path, corrections, blacklist):
                     # Cherche le N° de quai : fin du nom ("horman 2"), début ("24 porte..."), ou abloy/assa
                     m = re.search(r'(?:abloy|assa)\s+(\d+)', nom, re.IGNORECASE) or \
                         re.search(r'(\d+)\s*$', nom) or \
-                        re.search(r'^(\d+)\b', nom)
+                        re.search(r'^(\d+)\b', nom) or \
+                        re.search(r'\b(\d+)\b', nom)  # fallback : 1er nombre standalone dans le nom
                     if m: quais.setdefault(int(m.group(1)),{})['porte']=(serie,com)
                 elif re.search(r'niveleur', nom, re.IGNORECASE):
                     # ^(\d+) évite de matcher le modèle en fin ("2 Niveleur 232" → 2, pas 232)
                     # (\d+)\s*$ : fallback quai en fin de nom ("Niveleur bavette pivotant 8" → 8)
                     m = re.search(r':\s*(\d+)', nom) or \
                         re.search(r'^(\d+)\b', nom) or \
-                        re.search(r'(\d+)\s*$', nom)
+                        re.search(r'(\d+)\s*$', nom) or \
+                        re.search(r'\b(\d+)\b', nom)  # fallback : 1er nombre standalone dans le nom
                     if m: quais.setdefault(int(m.group(1)),{})['niv']=(serie,com)
                 elif re.search(r'\bsas\b', nom, re.IGNORECASE):
                     # ^(\d+) évite de matcher les dims en fin ("2 Sas 403 ... bande jaune" → 2)
                     # (\d+)\s*$ : fallback quai en fin de nom ("Sas d'étanchéité 8" → 8)
                     m = re.search(r'(?:abloy)\s+(\d+)', nom, re.IGNORECASE) or \
                         re.search(r'^(\d+)\b', nom) or \
-                        re.search(r'(\d+)\s*$', nom)
+                        re.search(r'(\d+)\s*$', nom) or \
+                        re.search(r'\b(\d+)\b', nom)  # fallback : 1er nombre standalone dans le nom
                     if m: quais.setdefault(int(m.group(1)),{})['sas']=(serie,com)
     rows_data = []
     for qn in sorted(quais.keys()):
@@ -1528,7 +1531,7 @@ def do_update(download_url, log_fn=None):
             import tkinter as _tk
             if not _tk._default_root: os._exit(0)
             root = _tk._default_root
-            for i in range(5, 0, -1):
+            for i in range(2, 0, -1):
                 log(f"Fermeture dans {i} seconde{'s' if i>1 else ''}...")
                 time.sleep(1)
             root.after(0, root.destroy)
