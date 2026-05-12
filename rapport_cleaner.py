@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.8.1"
+VERSION = "V0.3.8.2"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
@@ -1625,6 +1625,14 @@ def do_update(download_url, progress_fn=None, log_fn=None):
 
         # ── Auto-relaunch + fermeture ─────────────────────────────────────────
         time.sleep(0.8)  # laisser voir la barre verte
+        # Attendre que Defender ait fini de scanner le nouvel exe (max 30s)
+        for _ in range(30):
+            try:
+                with open(exe_path, 'rb') as f:
+                    f.read(1024)
+                break  # fichier accessible → scan terminé
+            except:
+                time.sleep(1)
         try:
             subprocess.Popen([exe_path, UPDATER_FLAG])
         except Exception:
@@ -2368,10 +2376,6 @@ if __name__ == '__main__':
                     except: pass
             threading.Thread(target=_cleanup_old, daemon=True).start()
     except: pass
-    # Si lancé après une MAJ automatique, attendre que l'ancien exe libère tkdnd
-    # avant d'initialiser TkinterDnD (évite le crash "Unable to load tkdnd library")
-    if UPDATER_FLAG in sys.argv:
-        import time; time.sleep(1)
     app = App()
     if UPDATER_FLAG in sys.argv:
         # Petite bannière de notification mise à jour
