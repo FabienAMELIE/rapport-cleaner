@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.7"
+VERSION = "V0.3.8"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
@@ -2368,6 +2368,10 @@ if __name__ == '__main__':
                     except: pass
             threading.Thread(target=_cleanup_old, daemon=True).start()
     except: pass
+    # Si lancé après une MAJ automatique, attendre que l'ancien exe libère tkdnd
+    # avant d'initialiser TkinterDnD (évite le crash "Unable to load tkdnd library")
+    if UPDATER_FLAG in sys.argv:
+        import time; time.sleep(1)
     app = App()
     if UPDATER_FLAG in sys.argv:
         # Petite bannière de notification mise à jour
