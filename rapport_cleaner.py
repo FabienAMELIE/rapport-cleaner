@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.6.4.4"
+VERSION = "V0.3.7"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
@@ -724,7 +724,14 @@ def extract_and_map_images(pdf_path, img_dir, n_col=1):
     return img_map
 
 def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_fn=None, progress_fn=None):
+    # ── Phrase rigolote : 1 seule, injectée à une position aléatoire parmi les lignes du journal
+    _funny_phrase = random.choice(_FUNNY_LINES)
+    _funny_at = random.randint(0, 6)  # 7 lignes de log environ → injection entre la 0ème et la 6ème
+    _log_count = [0]
     def log(msg):
+        _log_count[0] += 1
+        if _log_count[0] == _funny_at and log_fn:
+            log_fn(_funny_phrase)
         if log_fn: log_fn(msg)
     def progress(val):
         if progress_fn: progress_fn(val)
@@ -748,10 +755,6 @@ def generate_pdf(pdf_path, output_path, structure, corrections, blacklist, log_f
 
     progress(85)
     log("Génération du PDF...")
-    # Phrases rigolotes glissées dans le journal
-    funny = _get_funny_lines()
-    for f in funny:
-        log(f)
     _build_pdf(output_path, rows_data, img_map, img_dir, structure, quais, log)
     log(f"✓ PDF généré : {output_path}")
 
@@ -1464,7 +1467,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
 
     # Logo en haut à droite
     story = []
-    story.append(Spacer(1, 6*mm))  # marge supérieure : centre visuellement titre/logo
+    story.append(Spacer(1, 4*mm))  # espace symétrique : avant le titre
     logo_path = resource_path('LS_LOGO_HOR_RGB_TRANSPARANT.png')
     if os.path.exists(logo_path):
         try:
@@ -1494,6 +1497,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                 ('BOTTOMPADDING',(0,0),(-1,-1), 4),
             ]))
             story.append(header_table)
+            story.append(Spacer(1, 4*mm))  # espace symétrique : après le titre
         except Exception as e:
             story.append(Paragraph(titre_final, ts))
     else:
