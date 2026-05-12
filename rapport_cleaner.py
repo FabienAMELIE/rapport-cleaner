@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.8.3"
+VERSION = "V1.0"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
@@ -1954,13 +1954,17 @@ class App(_AppBase):
         self.pdf_path = tk.StringVar()
         self.out_path = tk.StringVar()
 
-        # Icône barre des tâches
+        # Icône barre des tâches — .ico prioritaire (plus fiable Windows), fallback .png
+        try:
+            self.iconbitmap(resource_path('LS_LOGO_ICON.ico'))
+        except Exception as e:
+            print(f"Icône .ico : {e}")
         try:
             _ico_img = ImageTk.PhotoImage(file=resource_path('LS_LOGO_VERT_RGB_TRANSPARANT.png'))
             self.iconphoto(True, _ico_img)
             self._ico_ref = _ico_img
         except Exception as e:
-            print(f"Icône barre des tâches : {e}")
+            print(f"Icône .png : {e}")
 
         self._build_ui()
         self._center()
@@ -2393,4 +2397,8 @@ if __name__ == '__main__':
                      bg=C_SUCCESS, fg='white', font=('Helvetica', 10, 'bold')).pack(expand=True)
             banner.after(3500, banner.destroy)
         app.after(600, _show_updated_banner)
+        # Passer au premier plan après relaunch
+        app.after(300, lambda: (app.lift(), app.focus_force(),
+                                app.attributes('-topmost', True)))
+        app.after(1500, lambda: app.attributes('-topmost', False))
     app.mainloop()
