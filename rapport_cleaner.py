@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V0.3.8.2"
+VERSION = "V0.3.8.3"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
