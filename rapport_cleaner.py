@@ -22,7 +22,7 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
 from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas as _BaseCanvas
 
-VERSION = "V1.0"
+VERSION = "V1.01"
 GITHUB_REPO = "FabienAMELIE/rapport-cleaner"
 
 # ── Phrases rigolotes du journal ──────────────────────────────────────────────
@@ -440,6 +440,16 @@ def clean_cell(text, corrections=None, blacklist=None):
         if not t_stripped or residual in _CONTAINER_WORDS:
             return ''
         t = t_stripped
+    # ── Strip "graissage/gressage resserrage" et "graissage recharge" ──────────
+    # Supprime la phrase partout dans la cellule (pas seulement en fullmatch)
+    _GRAIS_RE = re.compile(
+        r'\b(?:gr[ae]?issage|gressage)\s+r[ae]?sserrage\b|\bgraissage\s+recharge\b',
+        re.IGNORECASE)
+    if _GRAIS_RE.search(t):
+        t = _GRAIS_RE.sub('', t)
+        t = re.sub(r'^[\s/\-,;.]+', '', t); t = re.sub(r'[\s/\-,;.]+$', '', t)
+        t = re.sub(r' {2,}', ' ', t).strip()
+        if not t: return ''
     bl = blacklist or []
     if is_blacklisted_full(t, bl): return ''
     t = strip_blacklisted_parts(t, bl)
@@ -1175,7 +1185,7 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
         if m and m.group(1) and int(m.group(1)) > 0:
             return int(m.group(1))
         # Chiffre en fin précédé de x, *, × : "Tendeur long x3", "Tendeur long *2", "Tendeur long ×1"
-        m2 = re.search(r'[xX*×]\s*(\d+)\s*$', s)
+        m2 = re.search(r'(?<!\d)[xX*×]\s*(\d+)\s*$', s)  # lookbehind : pas un chiffre avant × (évite 3400×600)
         return int(m2.group(1)) if m2 else 1
     cats={}; tcats={}; vns=[]
     _label_canon = {}  # normalized_key -> canonical display label
@@ -1188,6 +1198,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
     def add(c,n,q=1):
         # Normaliser cassé/cassée → hs dans le label affiché aussi
         c = re.sub(r'\bcass[eé]e?\b', 'hs', c, flags=re.IGNORECASE)
+        # Normaliser butoire → butoir
+        c = re.sub(r'\bbutoires?\b', lambda m: 'butoirs' if m.group().endswith('s') else 'butoir', c, flags=re.IGNORECASE)
         nk = _norm_label(c)
         if nk not in _label_canon: _label_canon[nk] = c
         can = _label_canon[nk]
@@ -1220,6 +1232,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                     parts = re.split(r'(?<=\s)(?=\d+\s*(?:longs?|courts?|extensibles?|crochets?|[lces]\b))', rs)
                     segs_sas.extend([p.strip() for p in parts if p.strip()])
                 for seg in segs_sas:
+                    # Normalise "tendeur s long" → "tendeurs long" (split pdfplumber de "tendeurs")
+                    seg = re.sub(r'tendeur\s+s', 'tendeurs', seg, flags=re.IGNORECASE)
                     seg=seg.strip(); q=eq(seg)
                     if re.search(r'\bcrochets?\b',seg) or re.search(r'\b\d+\s*s\b',seg):
                         addt('Crochet S',n,q); continue
@@ -1375,6 +1389,8 @@ def _build_summary(rows_data, title, active_col_labels=None, tech_notes=None, st
                         else:
                             add('Bavette HS', n)
                         seg_matched = True
+                    if re.search(r'\bbutoir[e]?s?\b', sl) and not_vetuste:
+                        add('Butoir HS', n, eq(seg)); seg_matched = True
                     if 'hublot' in sl and not_vetuste: add('Hublot HS', n); seg_matched = True
                     if 'parachute' in sl and not_vetuste: add('Parachute HS', n); seg_matched = True
                     if 'moteur' in sl and not_vetuste: add('Moteur HS', n); seg_matched = True
